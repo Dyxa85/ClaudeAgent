@@ -1,0 +1,19 @@
+{
+  "name": "trading-ai-agent",
+  "version": "1.0.0",
+  "description": "Autonomous AI Trading Agent with Coinbase MCP + Claude AI",
+  "main": "index.js",
+  "scripts": {
+    "start": "node -r dotenv/config index.js",
+    "paper": "TRADING_MODE=paper node -r dotenv/config index.js",
+    "live": "TRADING_MODE=live node -r dotenv/config index.js",
+    "dashboard": "node dashboard-server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "better-sqlite3": "^9.6.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
