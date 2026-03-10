@@ -1,159 +1,255 @@
 /**
- * Paper Wallet — mit vollständiger SQLite-Persistenz
+ * PaperWallet — Virtuelles Wallet mit realistischer Order-Simulation
+ *
+ * Alle Preise, Fees und Slippage kommen von der echten Coinbase API
+ * über CoinbaseClient._simulatePaperOrder().
+ *
+ * Was simuliert wird (identisch zu Live):
+ *   - Echter Bid/Ask Spread (BUY zum Ask, SELL zum Bid)
+ *   - Slippage basierend auf echter Orderbuch-Tiefe
+ *   - Echte Taker-Fee vom Account-Tier
+ *   - Minimale Ordergröße ($1 Quote-Minimum)
+ *
+ * Was NICHT simuliert wird (bewusst vereinfacht):
+ *   - Partial fills bei sehr großen Orders
+ *   - Network latency / order rejection
+ *   - Funding rates (nur bei Futures relevant)
  */
+
+'use strict';
 
 const { getPersistence } = require('./persistence');
 
 class PaperWallet {
   constructor(initialBalance = 10000) {
-    this.db = getPersistence();
-    this.initialBalance = initialBalance;
+    this.db           = getPersistence();
+    this.feeRate      = 0.006; // Tier 1 Default — wird von agent.js überschrieben
+    this.totalFeePaid = 0;
 
     const saved = this.db.loadWallet();
-
     if (saved) {
       this.initialBalance = saved.initialBalance;
       this.cashBalance    = saved.cashBalance;
       this.positions      = saved.positions;
-      console.log(`💾 Wallet wiederhergestellt: $${this.cashBalance.toFixed(2)} Cash, ${Object.keys(this.positions).length} Positionen`);
+      this.totalFeePaid   = parseFloat(this.db.getMeta('total_fee_paid', '0'));
+      console.log(
+        `💾 Wallet wiederhergestellt: $${this.cashBalance.toFixed(2)} Cash,` +
+        ` ${Object.keys(this.positions).length} Positionen,` +
+        ` $${this.totalFeePaid.toFixed(4)} Gebühren gesamt`
+      );
     } else {
-      this.cashBalance = initialBalance;
-      this.positions   = {};
+      this.initialBalance = initialBalance;
+      this.cashBalance    = initialBalance;
+      this.positions      = {};
       this.db.saveWallet(initialBalance, this.cashBalance, this.positions);
-      this.db.setMeta('initial_balance', initialBalance);
+      this.db.setMeta('initial_balance', initialBalance.toString());
+      this.db.setMeta('total_fee_paid',  '0');
       console.log(`💾 Neues Wallet angelegt: $${initialBalance.toFixed(2)}`);
     }
   }
 
-  buy(symbol, amountUSD, currentPrice) {
-    if (amountUSD > this.cashBalance) {
-      return { success: false, reason: 'Insufficient cash balance' };
+  /** Wird von agent.js nach getFeeRate() gesetzt */
+  setFeeRate(rate) {
+    if (this.feeRate !== rate) {
+      console.log(`💸 Fee-Rate: ${(this.feeRate * 100).toFixed(2)}% → ${(rate * 100).toFixed(2)}%`);
+      this.feeRate = rate;
     }
-    const quantity = amountUSD / currentPrice;
+  }
+
+  // ─── BUY ────────────────────────────────────────────────────────────────────
+  /**
+   * @param {string} symbol
+   * @param {number} amountUSD   Brutto-Betrag in USD (inkl. Fee)
+   * @param {object} orderResult Ergebnis von CoinbaseClient.executeMarketOrder()
+   */
+  buy(symbol, amountUSD, orderResult) {
+    const fee        = orderResult.fee        ?? amountUSD * this.feeRate;
+    const netAmount  = amountUSD - fee;
+    const fillPrice  = orderResult.avg_fill_price;
+    const quantity   = orderResult.filled_base ?? (netAmount / fillPrice);
+    const slippage   = orderResult.slippage_pct ?? 0;
+
+    if (amountUSD > this.cashBalance) {
+      return { success: false, reason: `Insufficient cash: need $${amountUSD.toFixed(2)}, have $${this.cashBalance.toFixed(2)}` };
+    }
+
     if (this.positions[symbol]) {
-      const existing  = this.positions[symbol];
-      const totalQty  = existing.quantity + quantity;
-      const totalCost = existing.quantity * existing.avgPrice + quantity * currentPrice;
+      const p          = this.positions[symbol];
+      const totalQty   = p.quantity + quantity;
+      const totalCost  = p.cost_basis + amountUSD; // Gesamteinstand inkl. Fee
       this.positions[symbol] = {
-        quantity: totalQty, avgPrice: totalCost / totalQty,
-        currentPrice, currentValue: totalQty * currentPrice,
-        unrealizedPnL: totalQty * (currentPrice - totalCost / totalQty),
+        quantity:      totalQty,
+        avg_price:     totalCost / totalQty,        // echter Durchschnittspreis inkl. Fee
+        cost_basis:    totalCost,
+        current_price: fillPrice,
+        current_value: totalQty * fillPrice,
+        unrealized_pnl: totalQty * fillPrice - totalCost,
       };
     } else {
       this.positions[symbol] = {
-        quantity, avgPrice: currentPrice, currentPrice,
-        currentValue: amountUSD, unrealizedPnL: 0,
+        quantity:       quantity,
+        avg_price:      amountUSD / quantity,        // Einstandspreis inkl. Fee
+        cost_basis:     amountUSD,
+        current_price:  fillPrice,
+        current_value:  quantity * fillPrice,
+        unrealized_pnl: -fee,                        // Fee ist sofortiger Verlust
       };
     }
-    this.cashBalance -= amountUSD;
+
+    this.cashBalance  -= amountUSD;
+    this.totalFeePaid += fee;
+    this.db.setMeta('total_fee_paid', this.totalFeePaid.toString());
+
     const trade = {
-      id: `trade_${Date.now()}`, action: 'BUY', symbol, quantity,
-      price: currentPrice, amount_usd: amountUSD,
-      timestamp: new Date().toISOString(),
+      id:              orderResult.order_id,
+      action:          'BUY',
+      symbol,
+      quantity:        parseFloat(quantity.toFixed(8)),
+      price:           fillPrice,
+      amount_usd:      parseFloat(amountUSD.toFixed(2)),
+      fee:             parseFloat(fee.toFixed(6)),
+      net_amount:      parseFloat(netAmount.toFixed(2)),
+      slippage_pct:    slippage,
+      timestamp:       orderResult.created_at || new Date().toISOString(),
       portfolio_value: this.getState().totalValue,
     };
-    this.db.saveTradeWithState(trade, this.cashBalance, this.positions, this.getState().totalValue);
+
+    this.db.saveTradeWithState(trade, this.cashBalance, this.positions, trade.portfolio_value);
+    console.log(`  🟢 BUY  ${symbol}: ${quantity.toFixed(6)} @ $${fillPrice.toFixed(2)} | Fee: $${fee.toFixed(4)} | Slippage: ${slippage}%`);
     return { success: true, trade };
   }
 
-  sell(symbol, amountUSD, currentPrice) {
+  // ─── SELL ───────────────────────────────────────────────────────────────────
+
+  sell(symbol, amountUSD, orderResult) {
     const position = this.positions[symbol];
     if (!position) return { success: false, reason: `No position in ${symbol}` };
 
-    const quantityToSell = Math.min(amountUSD / currentPrice, position.quantity);
-    const proceeds       = quantityToSell * currentPrice;
-    const costBasis      = quantityToSell * position.avgPrice;
-    const realizedPnL    = proceeds - costBasis;
-    const pnlPct         = ((realizedPnL / costBasis) * 100).toFixed(2);
+    const fillPrice      = orderResult.avg_fill_price;
+    const quantityToSell = Math.min(orderResult.filled_base ?? (amountUSD / fillPrice), position.quantity);
+    const grossProceeds  = quantityToSell * fillPrice;
+    const fee            = orderResult.fee ?? (grossProceeds * this.feeRate);
+    const netProceeds    = grossProceeds - fee;
+    const slippage       = orderResult.slippage_pct ?? 0;
 
-    position.quantity -= quantityToSell;
-    if (position.quantity < 0.000001) {
+    // P&L berechnen: Netto-Erlös minus anteiliger Einstandspreis
+    const costBasisSold = position.cost_basis * (quantityToSell / position.quantity);
+    const realizedPnL   = netProceeds - costBasisSold;
+    const pnlPct        = parseFloat((realizedPnL / costBasisSold * 100).toFixed(2));
+
+    position.quantity  -= quantityToSell;
+    if (position.quantity < 0.0000001) {
       delete this.positions[symbol];
     } else {
-      position.currentPrice  = currentPrice;
-      position.currentValue  = position.quantity * currentPrice;
-      position.unrealizedPnL = position.quantity * (currentPrice - position.avgPrice);
+      position.cost_basis    -= costBasisSold;
+      position.current_price  = fillPrice;
+      position.current_value  = position.quantity * fillPrice;
+      position.unrealized_pnl = position.quantity * fillPrice - position.cost_basis;
     }
-    this.cashBalance += proceeds;
+
+    this.cashBalance  += netProceeds;
+    this.totalFeePaid += fee;
+    this.db.setMeta('total_fee_paid', this.totalFeePaid.toString());
 
     const trade = {
-      id: `trade_${Date.now()}`, action: 'SELL', symbol,
-      quantity: quantityToSell, price: currentPrice, amount_usd: proceeds,
-      realizedPnL, pnlPct,
-      timestamp: new Date().toISOString(),
+      id:              orderResult.order_id,
+      action:          'SELL',
+      symbol,
+      quantity:        parseFloat(quantityToSell.toFixed(8)),
+      price:           fillPrice,
+      amount_usd:      parseFloat(netProceeds.toFixed(2)),
+      gross_proceeds:  parseFloat(grossProceeds.toFixed(2)),
+      fee:             parseFloat(fee.toFixed(6)),
+      realized_pnl:    parseFloat(realizedPnL.toFixed(2)),
+      pnl_pct:         pnlPct,
+      slippage_pct:    slippage,
+      timestamp:       orderResult.created_at || new Date().toISOString(),
       portfolio_value: this.getState().totalValue,
     };
-    this.db.saveTradeWithState(trade, this.cashBalance, this.positions, this.getState().totalValue);
+
+    this.db.saveTradeWithState(trade, this.cashBalance, this.positions, trade.portfolio_value);
+    const pnlStr = realizedPnL >= 0 ? `+$${realizedPnL.toFixed(2)}` : `-$${Math.abs(realizedPnL).toFixed(2)}`;
+    console.log(`  🔴 SELL ${symbol}: ${quantityToSell.toFixed(6)} @ $${fillPrice.toFixed(2)} | Fee: $${fee.toFixed(4)} | P&L: ${pnlStr} (${pnlPct}%)`);
     return { success: true, trade };
   }
 
+  // ─── Preise aktualisieren (ohne Trade) ─────────────────────────────────────
+
   updatePrices(priceMap) {
     for (const [symbol, price] of Object.entries(priceMap)) {
-      if (this.positions[symbol]) {
-        const p = this.positions[symbol];
-        p.currentPrice = price; p.currentValue = p.quantity * price;
-        p.unrealizedPnL = p.quantity * (price - p.avgPrice);
+      const p = this.positions[symbol];
+      if (p) {
+        p.current_price  = price;
+        p.current_value  = p.quantity * price;
+        p.unrealized_pnl = p.quantity * price - p.cost_basis;
       }
     }
+    // Periodischer Snapshot ohne Trade
     this._priceUpdateCount = (this._priceUpdateCount || 0) + 1;
     if (this._priceUpdateCount % 10 === 0) {
       this.db.saveSnapshot(this.getState().totalValue);
     }
   }
 
+  // ─── State für Dashboard + AI ──────────────────────────────────────────────
+
   getState() {
-    const positionsValue = Object.values(this.positions).reduce((sum, p) => sum + p.currentValue, 0);
-    const totalValue     = this.cashBalance + positionsValue;
-    const totalReturn    = ((totalValue - this.initialBalance) / this.initialBalance * 100).toFixed(2);
+    const posValue   = Object.values(this.positions).reduce((s, p) => s + p.current_value, 0);
+    const totalValue = this.cashBalance + posValue;
+    const totalReturn = (totalValue - this.initialBalance) / this.initialBalance * 100;
+
     return {
-      cashBalance:    parseFloat(this.cashBalance.toFixed(2)),
-      positionsValue: parseFloat(positionsValue.toFixed(2)),
-      totalValue:     parseFloat(totalValue.toFixed(2)),
-      totalReturnPct: parseFloat(totalReturn),
+      cashBalance:     parseFloat(this.cashBalance.toFixed(2)),
+      positionsValue:  parseFloat(posValue.toFixed(2)),
+      totalValue:      parseFloat(totalValue.toFixed(2)),
+      totalReturnPct:  parseFloat(totalReturn.toFixed(2)),
+      totalFeePaid:    parseFloat(this.totalFeePaid.toFixed(4)),
+      feeRate:         this.feeRate,
       positions: Object.entries(this.positions).map(([symbol, p]) => ({
         symbol,
         quantity:         parseFloat(p.quantity.toFixed(8)),
-        avgPrice:         parseFloat(p.avgPrice.toFixed(2)),
-        currentPrice:     parseFloat((p.currentPrice || p.avgPrice).toFixed(2)),
-        currentValue:     parseFloat(p.currentValue.toFixed(2)),
-        unrealizedPnL:    parseFloat((p.unrealizedPnL || 0).toFixed(2)),
-        unrealizedPnLPct: parseFloat(((p.unrealizedPnL || 0) / (p.quantity * p.avgPrice) * 100).toFixed(2)),
+        avg_price:        parseFloat(p.avg_price.toFixed(2)),
+        current_price:    parseFloat(p.current_price.toFixed(2)),
+        current_value:    parseFloat(p.current_value.toFixed(2)),
+        cost_basis:       parseFloat(p.cost_basis.toFixed(2)),
+        unrealized_pnl:   parseFloat(p.unrealized_pnl.toFixed(2)),
+        unrealized_pnl_pct: parseFloat((p.unrealized_pnl / p.cost_basis * 100).toFixed(2)),
       })),
       tradeCount: this.db.getTradeCount(),
     };
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+
 class StrategyMemory {
   constructor() {
-    this.db = getPersistence();
+    this.db          = getPersistence();
     this._trades     = [];
     this._strategies = [];
-    this.maxTrades   = 1000;
   }
 
   async load() {
     this._trades     = this.db.loadAllTrades();
     this._strategies = this.db.loadAllStrategies();
-    const version    = this.db.getStrategyVersion();
-    console.log(`💾 Memory geladen: ${this._trades.length} Trades, ${this._strategies.length} Strategien, Version ${version}`);
+    console.log(`💾 Memory: ${this._trades.length} Trades, ${this._strategies.length} Strategien, Version ${this.db.getStrategyVersion()}`);
   }
 
   async recordTrade(trade) {
     this._trades.push(trade);
-    if (this._trades.length > this.maxTrades) this._trades.shift();
+    if (this._trades.length > 1000) this._trades.shift();
   }
 
   async saveStrategy(strategy) {
     this.db.saveStrategy(strategy, this.db.getTradeCount());
     this._strategies.push(strategy);
-    console.log(`💾 Strategie gespeichert: ${strategy.name}`);
+    console.log(`💾 Neue Strategie: ${strategy.name} v${strategy.version}`);
   }
 
-  async getBestStrategy() { return this.db.loadLatestStrategy(); }
-  getStrategyVersion()    { return this.db.getStrategyVersion(); }
-  getRecentTrades(n = 20) { return this.db.loadRecentTrades(n); }
-  get strategies()        { return this._strategies; }
+  async getBestStrategy()   { return this.db.loadLatestStrategy(); }
+  getStrategyVersion()      { return this.db.getStrategyVersion(); }
+  getRecentTrades(n = 20)   { return this.db.loadRecentTrades(n); }
+  get strategies()          { return this._strategies; }
 
   getWinRate() {
     const sells = this._trades.filter(t => t.action === 'SELL' && t.realized_pnl != null);
@@ -184,33 +280,29 @@ class StrategyMemory {
     if (sells.length < 3) return 'N/A';
     const returns  = sells.map(t => t.realized_pnl / (t.amount_usd || 1));
     const avg      = returns.reduce((a, b) => a + b, 0) / returns.length;
-    const variance = returns.reduce((s, r) => s + (r - avg) ** 2, 0) / returns.length;
-    const std      = Math.sqrt(variance);
+    const std      = Math.sqrt(returns.reduce((s, r) => s + (r - avg) ** 2, 0) / returns.length);
     if (std === 0) return 'N/A';
     return parseFloat((avg / std * Math.sqrt(252)).toFixed(2));
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+
 class Logger {
   constructor() { this.logs = []; }
 
-  _log(level, emoji, fn, message, args) {
-    const entry = { level, timestamp: new Date().toISOString(), message, data: args };
+  _push(entry) {
     this.logs.push(entry);
     if (this.logs.length > 500) this.logs.shift();
-    fn(`[${entry.timestamp}] ${emoji} ${message}`, ...args);
   }
 
-  info(msg, ...a)  { this._log('INFO',  'ℹ️ ',  console.log,   msg, a); }
-  warn(msg, ...a)  { this._log('WARN',  '⚠️ ',  console.warn,  msg, a); }
-  error(msg, ...a) { this._log('ERROR', '❌',   console.error, msg, a); }
+  info(msg, ...a)  { const e = { level:'INFO',  ts: new Date().toISOString(), msg, data: a }; this._push(e); console.log( `[${e.ts}] ℹ️  ${msg}`, ...a); }
+  warn(msg, ...a)  { const e = { level:'WARN',  ts: new Date().toISOString(), msg, data: a }; this._push(e); console.warn(`[${e.ts}] ⚠️  ${msg}`, ...a); }
+  error(msg, ...a) { const e = { level:'ERROR', ts: new Date().toISOString(), msg, data: a }; this._push(e); console.error(`[${e.ts}] ❌  ${msg}`, ...a); }
 
   trade(action, d) {
-    const emoji = action === 'BUY' ? '🟢' : action === 'SELL' ? '🔴' : '⚪';
-    const entry = { level: 'TRADE', timestamp: new Date().toISOString(), action, details: d };
-    this.logs.push(entry);
-    if (this.logs.length > 500) this.logs.shift();
-    console.log(`[${entry.timestamp}] ${emoji} ${action} ${d.symbol} $${d.amount?.toFixed(2)} @ $${d.price?.toFixed(2)} (conf: ${((d.confidence||0)*100).toFixed(0)}%)`);
+    const e = { level:'TRADE', ts: new Date().toISOString(), action, details: d };
+    this._push(e);
   }
 
   getRecent(n = 50) { return this.logs.slice(-n); }

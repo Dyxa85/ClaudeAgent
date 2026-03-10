@@ -6,6 +6,7 @@
 const { AnthropicClient } = require('./anthropic-client');
 const { PaperWallet, StrategyMemory, Logger } = require('./paper-wallet');
 const { MarketAnalyzer } = require('./market-analyzer');
+const { CoinbaseClient } = require('./coinbase-client');
 const { getPersistence } = require('./persistence');
 
 class TradingAgent {
@@ -22,9 +23,17 @@ class TradingAgent {
     };
 
     this.db       = getPersistence();
+
+    // Einziger Coinbase Client — Paper und Live nutzen denselben
+    this.coinbase = new CoinbaseClient({
+      apiKey:    this.config.coinbaseApiKey    || process.env.COINBASE_API_KEY,
+      apiSecret: this.config.coinbaseApiSecret || process.env.COINBASE_API_SECRET,
+      isPaper:   this.config.mode !== 'live',
+    });
+
     this.wallet   = new PaperWallet(this.config.initialBalance);
     this.memory   = new StrategyMemory();
-    this.analyzer = new MarketAnalyzer();
+    this.analyzer = new MarketAnalyzer({ client: this.coinbase });
     this.ai       = new AnthropicClient();
     this.logger   = new Logger();
 
@@ -42,6 +51,9 @@ class TradingAgent {
     this.isRunning = true;
     this.logger.info('🚀 Trading Agent starting...', { mode: this.config.mode });
 
+    // Fee-Rate von Coinbase API holen (live oder bekannter Tier-Schedule)
+    await this._updateFeeRate();
+
     // Kompletten Zustand aus DB laden
     await this.memory.load();
     this.currentStrategy    = await this.memory.getBestStrategy();
@@ -54,6 +66,14 @@ class TradingAgent {
     while (this.isRunning) {
       try {
         await this.tradingCycle();
+
+        // Fee-Rate täglich neu von API holen (Volumen-Tier kann sich ändern)
+        this._cycleCount = (this._cycleCount || 0) + 1;
+        const cyclesPerDay = Math.floor(86400000 / this.config.decisionInterval);
+        if (this._cycleCount % cyclesPerDay === 0) {
+          await this._updateFeeRate();
+        }
+
         await this.sleep(this.config.decisionInterval);
       } catch (err) {
         this.logger.error('Trading cycle error:', err.message);
@@ -68,6 +88,12 @@ class TradingAgent {
     // 1. Gather market data for all symbols
     const marketData = await this.gatherMarketData();
     
+    // 1b. Warn if simulated data is being used
+    const simulated = Object.values(marketData).filter(d => d._source === 'simulated_fallback');
+    if (simulated.length > 0) {
+      this.logger.warn(`⚠️  Simulierte Daten für: ${simulated.map(d => d.symbol).join(', ')} — Coinbase API nicht erreichbar`);
+    }
+
     // 2. Get portfolio state
     const portfolioState = this.wallet.getState();
     
@@ -200,42 +226,44 @@ Make decisive, well-reasoned trades. If market conditions are unclear, HOLD is v
     const safeAmount = Math.min(amount_usd, maxAllowed);
 
     try {
+      // Echte Order via Coinbase API (Paper: simuliert, Live: real)
+      const orderResult = await this.coinbase.executeMarketOrder({
+        productId: symbol,
+        side:      action,
+        quoteSize: safeAmount,
+        feeRate:   this.wallet.feeRate,
+      });
+
       let tradeResult;
-      
       if (action === 'BUY') {
-        tradeResult = this.wallet.buy(symbol, safeAmount, currentPrice);
+        tradeResult = this.wallet.buy(symbol, safeAmount, orderResult);
       } else if (action === 'SELL') {
-        tradeResult = this.wallet.sell(symbol, safeAmount, currentPrice);
+        tradeResult = this.wallet.sell(symbol, safeAmount, orderResult);
       }
 
       if (tradeResult?.success) {
         this.tradeCount++;
+
+        // Trade mit allen Coinbase-Details (Fee, Slippage, Fill-Preis) speichern
         const trade = {
-          id: `trade_${Date.now()}`,
-          timestamp: new Date().toISOString(),
-          action,
-          symbol,
-          amount_usd: safeAmount,
-          price: currentPrice,
+          ...tradeResult.trade,
           confidence,
           reason,
-          stop_loss: currentPrice * (1 - (stop_loss_pct || 0.05)),
-          take_profit: currentPrice * (1 + (take_profit_pct || 0.10)),
-          portfolio_value: this.wallet.getState().totalValue
+          stop_loss:   orderResult.avg_fill_price * (1 - (stop_loss_pct  || 0.05)),
+          take_profit: orderResult.avg_fill_price * (1 + (take_profit_pct || 0.10)),
         };
 
         await this.memory.recordTrade(trade);
-        
         this.logger.trade(action, {
-          symbol,
-          amount: safeAmount,
-          price: currentPrice,
-          confidence,
-          reason
+          symbol, amount: safeAmount,
+          price: orderResult.avg_fill_price,
+          fee: orderResult.fee,
+          slippage: orderResult.slippage_pct,
+          confidence, reason,
         });
       }
     } catch (err) {
-      this.logger.error(`Failed to execute ${action} ${symbol}:`, err.message);
+      this.logger.error(`Order fehlgeschlagen ${action} ${symbol}:`, err.message);
     }
   }
 
@@ -323,6 +351,27 @@ Respond with improved strategy as JSON:
     // In DB persistieren (handled by updatePrices alle 10 Zyklen,
     // aber hier auch direkt nach jedem Zyklus)
     this.db.saveSnapshot(value);
+  }
+
+  async _updateFeeRate() {
+    try {
+      const coinbase = this.coinbase;
+      if (typeof coinbase.getFeeRate === 'function') {
+        const fee = await coinbase.getFeeRate();
+        this.wallet.setFeeRate(fee.taker);
+        this.logger.info(
+          `💸 Fee-Rate: ${(fee.taker * 100).toFixed(2)}% Taker / ${(fee.maker * 100).toFixed(2)}% Maker` +
+          ` (${fee.tier} — Quelle: ${fee.source})`
+        );
+        // Fee-Tier in DB speichern für Logs
+        this.db.setMeta('fee_taker', fee.taker.toString());
+        this.db.setMeta('fee_maker', fee.maker.toString());
+        this.db.setMeta('fee_tier',  fee.tier);
+        this.db.setMeta('fee_source', fee.source);
+      }
+    } catch (err) {
+      this.logger.warn('Fee-Rate konnte nicht geladen werden:', err.message);
+    }
   }
 
   stop() {
