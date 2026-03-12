@@ -358,6 +358,49 @@ class CoinbaseClient {
     return (await this._signedGet('/brokerage/accounts')).accounts || [];
   }
 
+  /**
+   * Alle Coinbase Portfolios (Sub-Konten) abrufen
+   * GET /brokerage/portfolios
+   * Gibt [] zurück wenn kein API-Key vorhanden oder Fehler
+   */
+  async getPortfolios() {
+    if (!this.apiKey || !this.apiSecret) return [];
+    try {
+      const data = await this._signedGet('/brokerage/portfolios');
+      return data.portfolios || [];
+    } catch (err) {
+      console.warn(`⚠️  getPortfolios fehlgeschlagen: ${err.message}`);
+      return [];
+    }
+  }
+
+  /**
+   * Detailliertes Portfolio-Breakdown (Balances, Positionen)
+   * GET /brokerage/portfolios/{portfolio_uuid}
+   */
+  async getPortfolioBreakdown(portfolioId) {
+    const data = await this._signedGet(`/brokerage/portfolios/${portfolioId}`);
+    return data.breakdown || null;
+  }
+
+  /**
+   * EUR/USD Kurs — öffentliche Coinbase v2 API, kein Auth nötig
+   * Gibt Fallback 0.92 zurück wenn API nicht erreichbar
+   */
+  async getEURUSDRate() {
+    try {
+      const res = await fetch('https://api.coinbase.com/v2/exchange-rates?currency=USD', {
+        headers: { 'User-Agent': 'TradingAgent/1.0' },
+      });
+      if (!res.ok) return 0.92;
+      const data = await res.json();
+      const rate = parseFloat(data.data?.rates?.EUR);
+      return (rate > 0 && rate < 2) ? rate : 0.92;
+    } catch {
+      return 0.92;
+    }
+  }
+
   // ═══════════════════════════════════════════════════════════════════════════
   // HTTP-LAYER — mit Rate-Limiting
   // ═══════════════════════════════════════════════════════════════════════════
