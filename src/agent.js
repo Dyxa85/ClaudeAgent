@@ -54,6 +54,18 @@ class TradingAgent {
     this.isRunning = true;
     this.logger.info('🚀 Trading Agent starting...', { mode: this.config.mode });
 
+    // Symbole aus DB laden falls Coinbase-Sync bereits lief (index.js setzt sie)
+    const savedSymbols = this.db.getMeta('coinbase_symbols');
+    if (savedSymbols) {
+      try {
+        const parsed = JSON.parse(savedSymbols);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          this.config.symbols = parsed;
+          this.logger.info(`🔍 Symbole aus Coinbase Portfolio: ${parsed.join(', ')}`);
+        }
+      } catch { /* behalte Default-Symbole */ }
+    }
+
     // Fee-Rate von Coinbase API holen (live oder bekannter Tier-Schedule)
     await this._updateFeeRate();
 
@@ -167,19 +179,32 @@ class TradingAgent {
   }
 
   buildSystemPrompt() {
-    const strategyContext = this.currentStrategy 
+    const strategyContext = this.currentStrategy
       ? `Current best strategy: ${this.currentStrategy.name}\nRules: ${JSON.stringify(this.currentStrategy.rules)}`
       : 'No prior strategy - develop one based on market conditions';
+
+    // Echtes Coinbase Portfolio als Kontext
+    const cbPortfolioUSD = parseFloat(this.db.getMeta('coinbase_portfolio_usd', '0'));
+    const cbHoldings     = JSON.parse(this.db.getMeta('coinbase_holdings_json', '[]'));
+    const cbPortfolioCtx = cbPortfolioUSD > 0
+      ? `\nREAL COINBASE PORTFOLIO (reference, read-only):\n` +
+        `- Total: $${cbPortfolioUSD.toFixed(2)}\n` +
+        cbHoldings.map(h => `- ${h.asset}: ${h.quantity.toFixed(6)} units @ avg $${h.avg_price.toFixed(2)} = $${h.value_usd.toFixed(2)}`).join('\n') +
+        `\nThis paper trading session SIMULATES performance on these exact holdings.\n` +
+        `Only trade symbols that match the real portfolio: ${this.config.symbols.join(', ')}`
+      : '';
 
     return `You are an autonomous crypto trading AI agent operating in ${this.config.mode.toUpperCase()} mode.
 
 MISSION: Maximize risk-adjusted returns while protecting capital.
 
 CONSTRAINTS:
+- Tradeable symbols: ${this.config.symbols.join(', ')}
 - Max position size: ${(this.config.maxPositionSize * 100).toFixed(0)}% of portfolio
 - Max risk per trade: ${(this.config.riskPerTrade * 100).toFixed(0)}% of portfolio
-- Always maintain at least 20% cash reserve
+- Always maintain at least 20% cash reserve (enforced in code — never suggest orders that breach this)
 - Never chase losses - stick to the strategy
+${cbPortfolioCtx}
 
 ${strategyContext}
 
@@ -189,8 +214,8 @@ RESPONSE FORMAT: Always respond with valid JSON only:
   "decisions": [
     {
       "action": "BUY|SELL|HOLD",
-      "symbol": "BTC-USD",
-      "amount_usd": 500,
+      "symbol": "SOL-USD",
+      "amount_usd": 50,
       "reason": "reasoning",
       "confidence": 0.75,
       "stop_loss_pct": 0.05,
@@ -244,8 +269,25 @@ Make decisive, well-reasoned trades. If market conditions are unclear, HOLD is v
     }
 
     const portfolioState = this.wallet.getState();
-    const maxAllowed = portfolioState.totalValue * this.config.maxPositionSize;
-    const safeAmount = Math.min(amount_usd, maxAllowed);
+    const maxAllowed     = portfolioState.totalValue * this.config.maxPositionSize;
+    let   safeAmount     = Math.min(amount_usd, maxAllowed);
+
+    // 20% Cash Reserve Enforcement — BUY darf diese Grenze nicht unterschreiten
+    if (action === 'BUY') {
+      const minCashReserve  = portfolioState.totalValue * 0.20;
+      const cashAfterBuy    = portfolioState.cashBalance - safeAmount;
+      if (cashAfterBuy < minCashReserve) {
+        safeAmount = Math.max(0, portfolioState.cashBalance - minCashReserve);
+        if (safeAmount < 10) {
+          this.logger.warn(
+            `⚠️ BUY ${symbol} übersprungen: 20% Cash Reserve würde unterschritten` +
+            ` ($${portfolioState.cashBalance.toFixed(2)} verfügbar, Reserve: $${minCashReserve.toFixed(2)})`
+          );
+          return;
+        }
+        this.logger.info(`📉 BUY-Betrag auf $${safeAmount.toFixed(2)} reduziert (20% Cash Reserve Schutz)`);
+      }
+    }
 
     let tradeResult;
     try {
@@ -352,7 +394,7 @@ Respond with improved strategy as JSON:
 
   getPerformanceMetrics() {
     const state = this.wallet.getState();
-    const initialBalance = this.config.initialBalance;
+    const initialBalance = this.wallet.initialBalance;
     
     return {
       total_return_pct: ((state.totalValue - initialBalance) / initialBalance * 100).toFixed(2),

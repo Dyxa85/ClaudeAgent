@@ -63,14 +63,14 @@ class TelegramBot {
   }
 
   async alertSellResult(trade) {
-    const pnl = trade.realizedPnL || 0;
+    const pnl = trade.realized_pnl || 0;
     const emoji = pnl >= 0 ? '💰' : '📉';
     const sign = pnl >= 0 ? '+' : '';
 
     await this.send(`${emoji} <b>SELL abgeschlossen — ${trade.symbol}</b>
 
-${pnl >= 0 ? '✅' : '❌'} <b>P&L:</b> ${sign}$${pnl.toFixed(2)} (${sign}${trade.pnlPct}%)
-💵 Erlös: $${trade.amountUSD.toFixed(2)} @ $${trade.price.toFixed(2)}`);
+${pnl >= 0 ? '✅' : '❌'} <b>P&L:</b> ${sign}$${pnl.toFixed(2)} (${sign}${trade.pnl_pct ?? 0}%)
+💵 Erlös: $${(trade.amount_usd ?? 0).toFixed(2)} @ $${(trade.price ?? 0).toFixed(2)}`);
   }
 
   async alertStrategyImproved(strategy) {
@@ -205,11 +205,15 @@ ${stateEmoji} | Modus: <b>${agent.config.mode.toUpperCase()}</b>
 
     let msg = '📦 <b>Offene Positionen</b>\n\n';
     for (const p of state.positions) {
-      const pnlSign = p.unrealizedPnL >= 0 ? '+' : '';
-      const emoji = p.unrealizedPnL >= 0 ? '🟢' : '🔴';
+      const pnl     = p.unrealized_pnl     ?? 0;
+      const pnlPct  = p.unrealized_pnl_pct ?? 0;
+      const curVal  = p.current_value      ?? 0;
+      const avgP    = p.avg_price          ?? 0;
+      const pnlSign = pnl >= 0 ? '+' : '';
+      const emoji   = pnl >= 0 ? '🟢' : '🔴';
       msg += `${emoji} <b>${p.symbol}</b>
-  💵 $${p.currentValue.toFixed(2)} | ${pnlSign}$${p.unrealizedPnL.toFixed(2)} (${pnlSign}${p.unrealizedPnLPct}%)
-  📊 ${p.quantity.toFixed(6)} @ ⌀$${p.avgPrice.toFixed(2)}\n\n`;
+  💵 $${curVal.toFixed(2)} | ${pnlSign}$${pnl.toFixed(2)} (${pnlSign}${pnlPct}%)
+  📊 ${p.quantity.toFixed(6)} @ ⌀$${avgP.toFixed(2)}\n\n`;
     }
     msg += `💵 Cash: $${state.cashBalance.toFixed(2)}`;
     await this.send(msg);

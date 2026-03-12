@@ -112,22 +112,67 @@ class MarketAnalyzer {
     return e;
   }
 
+  /** Returns the full EMA series as an array (same length as input after the warm-up). */
+  _emaSeries(values, period) {
+    if (values.length < period) return values.map(() => values[values.length - 1]);
+    const k      = 2 / (period + 1);
+    const result = [];
+    let   e      = values.slice(0, period).reduce((a, b) => a + b, 0) / period;
+    // Fill warm-up slots with the seed SMA so the array length matches input
+    for (let i = 0; i < period; i++) result.push(e);
+    for (let i = period; i < values.length; i++) {
+      e = values[i] * k + e * (1 - k);
+      result.push(e);
+    }
+    return result;
+  }
+
   _sma(values, period) {
     return values.slice(-period).reduce((a, b) => a + b, 0) / Math.min(period, values.length);
   }
 
   _macd(closes) {
-    const ema12 = this._ema(closes, 12);
-    const ema26 = this._ema(closes, 26);
-    const line  = ema12 - ema26;
-    // Signal: 9-period EMA of MACD — approximiert
-    const signal = line * 0.82;
+    if (closes.length < 35) {
+      // Not enough data for a proper 9-period EMA of the MACD line (need 26 + 9)
+      const ema12  = this._ema(closes, Math.min(12, closes.length));
+      const ema26  = this._ema(closes, Math.min(26, closes.length));
+      const line   = ema12 - ema26;
+      const signal = line * 0.9; // graceful fallback — clearly flagged
+      return {
+        macd:      parseFloat(line.toFixed(4)),
+        signal:    parseFloat(signal.toFixed(4)),
+        histogram: parseFloat((line - signal).toFixed(4)),
+        trend:     line > signal ? 'bullish' : 'bearish',
+        crossover: null,
+      };
+    }
+
+    // Full MACD line series → proper 9-period EMA as signal line
+    const ema12Series  = this._emaSeries(closes, 12);
+    const ema26Series  = this._emaSeries(closes, 26);
+    const macdSeries   = ema12Series.map((v, i) => v - ema26Series[i]);
+    const signalSeries = this._emaSeries(macdSeries, 9);
+
+    const line   = macdSeries[macdSeries.length - 1];
+    const signal = signalSeries[signalSeries.length - 1];
+    const prevLine   = macdSeries[macdSeries.length - 2];
+    const prevSignal = signalSeries[signalSeries.length - 2];
+
+    // Detect fresh crossovers (signal crossed within the last candle)
+    const crossover = (prevLine <= prevSignal && line > signal)
+      ? 'bullish_cross'
+      : (prevLine >= prevSignal && line < signal)
+        ? 'bearish_cross'
+        : Math.abs(line - signal) < Math.abs(line) * 0.03
+          ? 'near_crossover'
+          : null;
+
     return {
       macd:      parseFloat(line.toFixed(4)),
       signal:    parseFloat(signal.toFixed(4)),
       histogram: parseFloat((line - signal).toFixed(4)),
       trend:     line > signal ? 'bullish' : 'bearish',
-      crossover: Math.abs(line - signal) < Math.abs(line) * 0.05 ? 'near_crossover' : null,
+      crossover,
     };
   }
 

@@ -108,13 +108,25 @@ async function syncCoinbasePortfolio() {
     const totalUSD = parseFloat(balances.total_balance?.value || 0);
     const totalEUR = totalUSD * _eurUSD;
 
-    agent.db.setMeta('coinbase_portfolio_id',   target.uuid);
-    agent.db.setMeta('coinbase_portfolio_name', target.name);
-    agent.db.setMeta('coinbase_portfolio_usd',  totalUSD.toFixed(4));
-    agent.db.setMeta('coinbase_portfolio_eur',  totalEUR.toFixed(4));
-    agent.db.setMeta('coinbase_portfolio_ts',   new Date().toISOString());
+    // Erkenne welche Crypto-Assets im Portfolio vorhanden sind
+    const holdings = await agent.coinbase.getCryptoHoldings(target.uuid);
+    const symbols  = holdings.map(h => h.symbol);
 
-    console.log(`💼 Coinbase Portfolio "${target.name}": $${totalUSD.toFixed(2)} | €${totalEUR.toFixed(2)}`);
+    agent.db.setMeta('coinbase_portfolio_id',      target.uuid);
+    agent.db.setMeta('coinbase_portfolio_name',    target.name);
+    agent.db.setMeta('coinbase_portfolio_usd',     totalUSD.toFixed(4));
+    agent.db.setMeta('coinbase_portfolio_eur',     totalEUR.toFixed(4));
+    agent.db.setMeta('coinbase_portfolio_ts',      new Date().toISOString());
+    agent.db.setMeta('coinbase_holdings_json',     JSON.stringify(holdings));
+
+    if (symbols.length > 0) {
+      agent.db.setMeta('coinbase_symbols', JSON.stringify(symbols));
+      // Agent sofort auf echte Symbole umstellen
+      agent.config.symbols = symbols;
+      console.log(`🔍 Symbole aus Coinbase Portfolio: ${symbols.join(', ')}`);
+    }
+
+    console.log(`💼 Coinbase Portfolio "${target.name}": $${totalUSD.toFixed(2)} | €${totalEUR.toFixed(2)} | Assets: ${symbols.join(', ') || 'nur Cash'}`);
   } catch (err) {
     console.warn(`⚠️  Coinbase Portfolio Sync: ${err.message}`);
   }
@@ -191,11 +203,13 @@ const server = http.createServer((req, res) => {
     }),
 
     '/api/coinbase-portfolio': () => ({
-      id:      agent.db.getMeta('coinbase_portfolio_id'),
-      name:    agent.db.getMeta('coinbase_portfolio_name', 'Trading Bot'),
-      usd:     parseFloat(agent.db.getMeta('coinbase_portfolio_usd', '0')),
-      eur:     parseFloat(agent.db.getMeta('coinbase_portfolio_eur', '0')),
-      updated: agent.db.getMeta('coinbase_portfolio_ts'),
+      id:       agent.db.getMeta('coinbase_portfolio_id'),
+      name:     agent.db.getMeta('coinbase_portfolio_name', 'Trading Bot'),
+      usd:      parseFloat(agent.db.getMeta('coinbase_portfolio_usd', '0')),
+      eur:      parseFloat(agent.db.getMeta('coinbase_portfolio_eur', '0')),
+      updated:  agent.db.getMeta('coinbase_portfolio_ts'),
+      holdings: JSON.parse(agent.db.getMeta('coinbase_holdings_json', '[]')),
+      symbols:  JSON.parse(agent.db.getMeta('coinbase_symbols', '[]')),
     }),
   };
 
@@ -214,28 +228,72 @@ async function syncWalletToCoinbase() {
   await _refreshEURRate();
   await syncCoinbasePortfolio();
 
-  const usdRaw = agent.db.getMeta('coinbase_portfolio_usd', '0');
-  const usd    = parseFloat(usdRaw);
-
-  if (usd <= 0) {
+  const totalUSD = parseFloat(agent.db.getMeta('coinbase_portfolio_usd', '0'));
+  if (totalUSD <= 0) {
     throw new Error('Kein Coinbase Portfolio-Wert verfügbar. API-Key prüfen.');
   }
 
-  // Wallet-State zurücksetzen
-  agent.wallet.initialBalance = usd;
-  agent.wallet.cashBalance    = usd;
-  agent.wallet.positions      = {};
-  agent.wallet.totalFeePaid   = 0;
-  agent.db.saveWallet(usd, usd, {});
-  agent.db.setMeta('initial_balance', usd.toString());
-  agent.db.setMeta('total_fee_paid',  '0');
+  const portfolioId = agent.db.getMeta('coinbase_portfolio_id');
+  const holdingsRaw = agent.db.getMeta('coinbase_holdings_json', '[]');
+  const holdings    = JSON.parse(holdingsRaw);
+
+  // ── Echte Asset-Positionen für Paper Wallet aufbauen ──────────────────────
+  const paperPositions = {};
+  let   investedUSD    = 0;
+
+  for (const holding of holdings) {
+    if (holding.quantity <= 0) continue;
+    // Aktuellen Preis holen für korrekte Bewertung
+    let currentPrice = holding.avg_price; // Fallback
+    try {
+      const ticker  = await agent.coinbase.getTicker(holding.symbol);
+      currentPrice  = ticker.price;
+    } catch { /* weiter mit avg_price als Fallback */ }
+
+    const currentValue = holding.quantity * currentPrice;
+    paperPositions[holding.symbol] = {
+      quantity:       holding.quantity,
+      avg_price:      holding.avg_price || currentPrice,
+      cost_basis:     holding.avg_price > 0
+                        ? holding.quantity * holding.avg_price
+                        : currentValue,
+      current_price:  currentPrice,
+      current_value:  currentValue,
+      unrealized_pnl: holding.avg_price > 0
+                        ? currentValue - (holding.quantity * holding.avg_price)
+                        : 0,
+    };
+    investedUSD += currentValue;
+  }
+
+  const cashUSD = Math.max(0, totalUSD - investedUSD);
+
+  // ── Paper Wallet atomisch zurücksetzen ────────────────────────────────────
+  agent.wallet.resetToPortfolio(totalUSD, cashUSD, paperPositions);
   agent.db.setMeta('coinbase_synced', new Date().toISOString());
 
-  const eur = usd * _eurUSD;
-  console.log(`🔄 Wallet zurückgesetzt: $${usd.toFixed(2)} (€${eur.toFixed(2)}) — basierend auf Coinbase Portfolio`);
-  await telegram.send(`🔄 <b>Paper Wallet zurückgesetzt</b>\n💼 Basis: €${eur.toFixed(2)}\n(Coinbase Portfolio "${agent.db.getMeta('coinbase_portfolio_name', 'Trading Bot')}")`);
+  const totalEUR  = totalUSD  * _eurUSD;
+  const cashEUR   = cashUSD   * _eurUSD;
+  const posNames  = Object.keys(paperPositions).map(s => s.split('-')[0]).join(', ') || 'nur Cash';
 
-  return { success: true, usd, eur, ts: new Date().toISOString() };
+  console.log(`✅ Wallet Sync: $${totalUSD.toFixed(2)} (€${totalEUR.toFixed(2)}) | Cash: $${cashUSD.toFixed(2)} | Positionen: ${posNames}`);
+
+  await telegram.send(
+    `🔄 <b>Paper Wallet synchronisiert</b>\n` +
+    `💼 Basis: €${totalEUR.toFixed(2)}\n` +
+    `💵 Cash: €${cashEUR.toFixed(2)}\n` +
+    `📦 Assets: ${posNames}\n` +
+    `(Coinbase: "${agent.db.getMeta('coinbase_portfolio_name', 'Trading Bot')}")`
+  );
+
+  return {
+    success:    true,
+    usd:        totalUSD,
+    eur:        totalEUR,
+    cash_usd:   cashUSD,
+    positions:  posNames,
+    ts:         new Date().toISOString(),
+  };
 }
 
 // ─── Start ───────────────────────────────────────────────────────────────────

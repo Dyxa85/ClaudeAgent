@@ -48,6 +48,27 @@ class PaperWallet {
     }
   }
 
+  /**
+   * Wallet komplett auf echtes Coinbase Portfolio zurücksetzen.
+   * Behält Trade-History, setzt aber Balances + Positionen neu.
+   * @param {number} initialBalance  Gesamtwert des Portfolios in USD (als neuer Referenzwert)
+   * @param {number} cashBalance     USD-Cash-Anteil
+   * @param {Object} positions       Map von symbol → {quantity, avg_price, cost_basis, current_price, current_value, unrealized_pnl}
+   */
+  resetToPortfolio(initialBalance, cashBalance, positions = {}) {
+    this.initialBalance = initialBalance;
+    this.cashBalance    = cashBalance;
+    this.positions      = positions;
+    this.totalFeePaid   = 0;
+    this.db.saveWallet(initialBalance, cashBalance, positions);
+    this.db.setMeta('initial_balance', initialBalance.toString());
+    this.db.setMeta('total_fee_paid',  '0');
+    console.log(
+      `🔄 Wallet zurückgesetzt: $${initialBalance.toFixed(2)} Basis | ` +
+      `$${cashBalance.toFixed(2)} Cash | ${Object.keys(positions).length} Positionen`
+    );
+  }
+
   /** Wird von agent.js nach getFeeRate() gesetzt */
   setFeeRate(rate) {
     if (this.feeRate !== rate) {

@@ -384,6 +384,50 @@ class CoinbaseClient {
   }
 
   /**
+   * Crypto-Holdings eines Portfolios — nur echte Assets (keine Stablecoins/USD).
+   * Gibt Array zurück: [{ symbol, asset, quantity, value_usd, avg_price }]
+   * Felder können Objekte {value, currency} oder direkte Zahlen sein (API-Version).
+   */
+  async getCryptoHoldings(portfolioId) {
+    if (!this.apiKey || !this.apiSecret) return [];
+    try {
+      const breakdown = await this.getPortfolioBreakdown(portfolioId);
+      if (!breakdown) return [];
+
+      const STABLECOINS = new Set(['USD', 'USDC', 'USDT', 'BUSD', 'DAI', 'GUSD', 'USDP', 'EUROC']);
+      const spots = breakdown.spot_positions || [];
+
+      // Hilfsfunktion: Wert aus Object {value, currency} oder Zahl extrahieren
+      const val = v => parseFloat(typeof v === 'object' ? (v?.value ?? 0) : (v ?? 0));
+
+      return spots
+        .filter(p => {
+          const asset = (p.asset || '').toUpperCase();
+          return !STABLECOINS.has(asset) && val(p.total_balance_fiat) > 0.5;
+        })
+        .map(p => {
+          const quantity  = val(p.total_balance_crypto);
+          const valueUSD  = val(p.total_balance_fiat);
+          // avg_price: aus average_entry_price oder aus cost_basis / quantity
+          let avgPrice = val(p.average_entry_price);
+          if (!avgPrice && quantity > 0) {
+            avgPrice = val(p.cost_basis) / quantity;
+          }
+          return {
+            symbol:    `${p.asset.toUpperCase()}-USD`,
+            asset:     p.asset.toUpperCase(),
+            quantity:  parseFloat(quantity.toFixed(8)),
+            value_usd: parseFloat(valueUSD.toFixed(4)),
+            avg_price: parseFloat(avgPrice.toFixed(4)),
+          };
+        });
+    } catch (err) {
+      console.warn(`⚠️  getCryptoHoldings fehlgeschlagen: ${err.message}`);
+      return [];
+    }
+  }
+
+  /**
    * EUR/USD Kurs — öffentliche Coinbase v2 API, kein Auth nötig
    * Gibt Fallback 0.92 zurück wenn API nicht erreichbar
    */
