@@ -46,7 +46,7 @@ class CoinbaseClient {
    * GET /brokerage/products/{product_id}
    */
   async getTicker(productId) {
-    const data = await this._get(`/brokerage/products/${productId}`);
+    const data = await this._marketGet(`/brokerage/products/${productId}`);
     const price = parseFloat(data.price);
     const bid   = parseFloat(data.best_bid);
     const ask   = parseFloat(data.best_ask);
@@ -78,7 +78,7 @@ class CoinbaseClient {
     const end   = Math.floor(Date.now() / 1000);
     const start = end - seconds * limit;
 
-    const data = await this._get(
+    const data = await this._marketGet(
       `/brokerage/products/${productId}/candles?start=${start}&end=${end}&granularity=${granularity}`
     );
 
@@ -102,7 +102,7 @@ class CoinbaseClient {
    * Wichtig für Paper-Mode: wir simulieren Slippage anhand echter Orderbuch-Tiefe
    */
   async getOrderBook(productId, limit = 10) {
-    const data = await this._get(`/brokerage/products/${productId}/book?limit=${limit}`);
+    const data = await this._marketGet(`/brokerage/products/${productId}/book?limit=${limit}`);
     return {
       bids: (data.bids || []).map(b => ({ price: parseFloat(b.price), size: parseFloat(b.size) })),
       asks: (data.asks || []).map(a => ({ price: parseFloat(a.price), size: parseFloat(a.size) })),
@@ -114,7 +114,7 @@ class CoinbaseClient {
    * GET /brokerage/products/{product_id}
    */
   async getProductInfo(productId) {
-    const data = await this._get(`/brokerage/products/${productId}`);
+    const data = await this._marketGet(`/brokerage/products/${productId}`);
     return {
       symbol:          data.product_id,
       base_currency:   data.base_currency_id,
@@ -362,6 +362,11 @@ class CoinbaseClient {
     return this._request(path, 'GET', null, false);
   }
 
+  // Marktdaten: mit Auth wenn API-Key vorhanden (Coinbase v3 erfordert Auth für /brokerage/products)
+  async _marketGet(path) {
+    return this._request(path, 'GET', null, !!(this.apiKey && this.apiSecret));
+  }
+
   async _signedGet(path) {
     return this._request(path, 'GET', null, true);
   }
@@ -420,10 +425,11 @@ class CoinbaseClient {
     const payload = Buffer.from(JSON.stringify({ sub: keyId, iss: 'cdp', nbf: now, exp: now + 120, uri })).toString('base64url');
     const sigInput = `${header}.${payload}`;
 
-    // PEM-Format sicherstellen
-    const pemKey = secret.includes('-----BEGIN')
+    // PEM-Format sicherstellen + Literal-\n (aus .env) in echte Zeilenumbrüche wandeln
+    const pemKey = (secret.includes('-----BEGIN')
       ? secret
-      : `-----BEGIN EC PRIVATE KEY-----\n${secret}\n-----END EC PRIVATE KEY-----`;
+      : `-----BEGIN EC PRIVATE KEY-----\n${secret}\n-----END EC PRIVATE KEY-----`
+    ).replace(/\\n/g, '\n');
 
     const sign = createSign('SHA256');
     sign.update(sigInput);
