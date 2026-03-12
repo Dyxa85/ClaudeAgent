@@ -194,6 +194,14 @@ class TradingAgent {
         `Only trade symbols that match the real portfolio: ${this.config.symbols.join(', ')}`
       : '';
 
+    // Aktuell Epoche — AI soll nur Daten dieser Epoche berücksichtigen
+    const epoch      = this.db.getCurrentEpoch();
+    const epochId    = this.db.getCurrentEpochId();
+    const epochStart = epoch ? epoch.started_at.replace('T', ' ').substring(0, 16) : 'unknown';
+    const epochCtx   = `\nDATA EPOCH: #${epochId} (started ${epochStart} UTC, reason: ${epoch?.reason || 'initial'})` +
+      `\nIMPORTANT: All trade history, performance metrics, and strategy data shown to you belongs to this epoch only.` +
+      `\nDo NOT reference or infer from previous epochs — they used different symbols or capital bases.\n`;
+
     return `You are an autonomous crypto trading AI agent operating in ${this.config.mode.toUpperCase()} mode.
 
 MISSION: Maximize risk-adjusted returns while protecting capital.
@@ -205,7 +213,7 @@ CONSTRAINTS:
 - Always maintain at least 20% cash reserve (enforced in code — never suggest orders that breach this)
 - Never chase losses - stick to the strategy
 ${cbPortfolioCtx}
-
+${epochCtx}
 ${strategyContext}
 
 RESPONSE FORMAT: Always respond with valid JSON only:

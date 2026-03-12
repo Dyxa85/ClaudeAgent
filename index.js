@@ -248,7 +248,7 @@ const server = http.createServer(async (req, res) => {
   // ── API Routes ────────────────────────────────────────────────────────────
   res.setHeader('Content-Type', 'application/json');
 
-  // POST /api/sync-wallet → Paper Wallet auf Coinbase Portfolio-Wert zurücksetzen
+  // POST /api/sync-wallet → Paper Wallet auf Coinbase Portfolio zurücksetzen + neue Epoche
   if (req.method === 'POST' && req.url === '/api/sync-wallet') {
     syncWalletToCoinbase()
       .then(result => res.end(JSON.stringify(result)))
@@ -256,25 +256,60 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // POST /api/new-epoch — Neue Daten-Epoche starten (alte bleibt als Archiv erhalten)
+  if (req.method === 'POST' && req.url === '/api/new-epoch') {
+    (async () => {
+      try {
+        const body   = await _parsePOSTBody(req);
+        const reason = body.reason || 'manual';
+        const label  = body.label  || null;
+        const newId  = agent.db.startNewEpoch({
+          reason,
+          label: label || `Epoche — ${new Date().toISOString().substring(0, 10)}`,
+          initialBalance: agent.wallet.initialBalance,
+        });
+        // Strategie-Versionsstring nicht resetten — läuft weiter;
+        // aber tradeCount und performanceHistory neu laden
+        agent.tradeCount         = agent.db.getTradeCount();
+        agent.performanceHistory = agent.db.loadSnapshots(500);
+        console.log(`🆕 API: Neue Epoche ${newId} gestartet (${reason})`);
+        res.end(JSON.stringify({ ok: true, epoch_id: newId, reason }));
+      } catch (err) {
+        res.statusCode = 500;
+        res.end(JSON.stringify({ error: err.message }));
+      }
+    })();
+    return;
+  }
+
   const routes = {
-    '/api/status': () => ({
-      running:     agent.isRunning,
-      paused:      agent.isPaused,
-      mode:        CONFIG.mode,
-      initialBalance: agent.wallet.initialBalance,
-      tradeCount:  agent.tradeCount,
-      strategy:    agent.currentStrategy?.name || 'Default',
-      uptime:      Math.floor(process.uptime()),
-      telegram:    telegram.enabled,
-      circuitBreaker: { drawdownLimit: CONFIG.circuitBreakerDrawdown },
-      fee: {
-        taker:       agent.wallet.feeRate,
-        taker_pct:   (agent.wallet.feeRate * 100).toFixed(2) + '%',
-        total_paid:  agent.wallet.totalFeePaid,
-        tier:        agent.db.getMeta('fee_tier',    'unknown'),
-        source:      agent.db.getMeta('fee_source',  'unknown'),
-      },
-    }),
+    '/api/status': () => {
+      const epoch = agent.db.getCurrentEpoch();
+      return {
+        running:     agent.isRunning,
+        paused:      agent.isPaused,
+        mode:        CONFIG.mode,
+        initialBalance: agent.wallet.initialBalance,
+        tradeCount:  agent.tradeCount,
+        strategy:    agent.currentStrategy?.name || 'Default',
+        uptime:      Math.floor(process.uptime()),
+        telegram:    telegram.enabled,
+        circuitBreaker: { drawdownLimit: CONFIG.circuitBreakerDrawdown },
+        fee: {
+          taker:       agent.wallet.feeRate,
+          taker_pct:   (agent.wallet.feeRate * 100).toFixed(2) + '%',
+          total_paid:  agent.wallet.totalFeePaid,
+          tier:        agent.db.getMeta('fee_tier',    'unknown'),
+          source:      agent.db.getMeta('fee_source',  'unknown'),
+        },
+        epoch: {
+          id:      agent.db.getCurrentEpochId(),
+          started: epoch?.started_at || null,
+          reason:  epoch?.reason     || null,
+          label:   epoch?.label      || null,
+        },
+      };
+    },
 
     '/api/portfolio':          () => agent.wallet.getState(),
     '/api/performance':        () => agent.getPerformanceMetrics(),
@@ -284,6 +319,7 @@ const server = http.createServer(async (req, res) => {
     '/api/history':            () => agent.db.loadSnapshots(200),
     '/api/health':             () => ({ ok: true, ts: Date.now() }),
     '/api/db-stats':           () => agent.db.getStats(),
+    '/api/epochs':             () => agent.db.getAllEpochs(),
 
     '/api/rates': () => ({
       eur_usd:  _eurUSD,
@@ -357,6 +393,15 @@ async function syncWalletToCoinbase() {
 
   const cashUSD = Math.max(0, totalUSD - investedUSD);
 
+  // ── Neue Epoche starten (alte Daten bleiben als Archiv erhalten) ─────────
+  const newEpochId = agent.db.startNewEpoch({
+    reason:         'sync_basis',
+    label:          `Sync ${new Date().toISOString().substring(0, 10)} — ${Object.keys(paperPositions).join(', ') || 'Cash'}`,
+    initialBalance: totalUSD,
+  });
+  agent.tradeCount         = 0;   // frischer Start
+  agent.performanceHistory = [];
+
   // ── Paper Wallet atomisch zurücksetzen ────────────────────────────────────
   agent.wallet.resetToPortfolio(totalUSD, cashUSD, paperPositions);
   agent.db.setMeta('coinbase_synced', new Date().toISOString());
@@ -365,18 +410,20 @@ async function syncWalletToCoinbase() {
   const cashEUR   = cashUSD   * _eurUSD;
   const posNames  = Object.keys(paperPositions).map(s => s.split('-')[0]).join(', ') || 'nur Cash';
 
-  console.log(`✅ Wallet Sync: $${totalUSD.toFixed(2)} (€${totalEUR.toFixed(2)}) | Cash: $${cashUSD.toFixed(2)} | Positionen: ${posNames}`);
+  console.log(`✅ Wallet Sync (Epoche ${newEpochId}): $${totalUSD.toFixed(2)} (€${totalEUR.toFixed(2)}) | Cash: $${cashUSD.toFixed(2)} | Positionen: ${posNames}`);
 
   await telegram.send(
-    `🔄 <b>Paper Wallet synchronisiert</b>\n` +
+    `🔄 <b>Paper Wallet synchronisiert — Epoche ${newEpochId}</b>\n` +
     `💼 Basis: €${totalEUR.toFixed(2)}\n` +
     `💵 Cash: €${cashEUR.toFixed(2)}\n` +
     `📦 Assets: ${posNames}\n` +
+    `🗂️ Alte Daten archiviert, neuer Clean-Start\n` +
     `(Coinbase: "${agent.db.getMeta('coinbase_portfolio_name', 'Trading Bot')}")`
   );
 
   return {
     success:    true,
+    epoch_id:   newEpochId,
     usd:        totalUSD,
     eur:        totalEUR,
     cash_usd:   cashUSD,

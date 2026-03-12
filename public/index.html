@@ -452,10 +452,11 @@
       <div class="coinbase-card-left">
         <div class="coinbase-card-label">COINBASE ECHTGUTHABEN</div>
         <div class="coinbase-card-name" id="coinbasePortfolioName">Trading Bot</div>
+        <div id="epochBadge" style="font-size:9px;color:#888;margin-top:2px;letter-spacing:0.05em">Epoche —</div>
       </div>
       <div class="coinbase-card-right">
         <div class="coinbase-card-value" id="coinbaseBalanceEUR">€—</div>
-        <button class="coinbase-sync-btn" onclick="syncWallet()">⟳ SYNC BASIS</button>
+        <button class="coinbase-sync-btn" onclick="syncWallet()" title="Setzt Paper Wallet auf Coinbase-Stand zurück und startet neue Daten-Epoche">⟳ SYNC BASIS</button>
       </div>
     </div>
 
@@ -916,8 +917,8 @@ async function syncWallet() {
     const res = await fetch('/api/sync-wallet', { method: 'POST', cache: 'no-store' });
     const data = await res.json();
     if (data.success) {
-      btn.textContent = '✓ SYNCED';
-      setTimeout(() => { btn.textContent = '⟳ SYNC BASIS'; btn.disabled = false; }, 2000);
+      btn.textContent = `✓ EPOCHE ${data.epoch_id || ''}`;
+      setTimeout(() => { btn.textContent = '⟳ SYNC BASIS'; btn.disabled = false; }, 3000);
       await refresh();
     } else {
       throw new Error(data.error || 'Unbekannter Fehler');
@@ -969,6 +970,14 @@ async function refresh() {
   if (portfolio && status?.initialBalance) {
     portfolio.initialBalance = status.initialBalance;
     renderPortfolio(portfolio, perf);
+  }
+
+  // Epoch badge
+  if (status?.epoch) {
+    const ep    = status.epoch;
+    const since = ep.started ? ep.started.substring(0, 10) : '—';
+    document.getElementById('epochBadge').textContent =
+      `Epoche ${ep.id} · seit ${since}`;
   }
 
   // Chart
