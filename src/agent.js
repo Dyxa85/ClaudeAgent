@@ -15,10 +15,11 @@ class TradingAgent {
       mode: config.mode || 'paper',          // 'paper' | 'live'
       symbols: config.symbols || ['BTC-USD', 'ETH-USD', 'SOL-USD'],
       initialBalance: config.initialBalance || 10000,
-      maxPositionSize: config.maxPositionSize || 0.15, // 15% per position
-      riskPerTrade: config.riskPerTrade || 0.02,       // 2% risk per trade
-      improvementCycle: config.improvementCycle || 10, // Improve after N trades
-      decisionInterval: config.decisionInterval || 60000, // 1 min
+      maxPositionSize: config.maxPositionSize || 0.15,       // 15% per position
+      riskPerTrade: config.riskPerTrade || 0.02,             // 2% risk per trade
+      improvementCycle: config.improvementCycle || 10,       // Improve after N trades
+      decisionInterval: config.decisionInterval || 60000,    // 1 min
+      circuitBreakerDrawdown: config.circuitBreakerDrawdown || 20, // Pause bei 20% Drawdown
       ...config
     };
 
@@ -38,7 +39,9 @@ class TradingAgent {
     this.logger   = new Logger();
 
     this.isRunning       = false;
+    this.isPaused        = false;
     this.currentStrategy = null;
+    this.onCircuitBreaker = null; // Callback: (drawdownPct, portfolioValue) => void
 
     // tradeCount und performanceHistory aus DB wiederherstellen
     this.tradeCount         = this.db.getTradeCount();
@@ -64,6 +67,12 @@ class TradingAgent {
 
     // Main trading loop
     while (this.isRunning) {
+      // Pause-Check: warten bis resume() aufgerufen wird
+      if (this.isPaused) {
+        await this.sleep(5000);
+        continue;
+      }
+
       try {
         await this.tradingCycle();
 
@@ -100,13 +109,22 @@ class TradingAgent {
     // 3. Get performance metrics
     const performance = this.getPerformanceMetrics();
 
+    // 3b. Circuit Breaker: Trading pausieren bei zu hohem Drawdown
+    const drawdownPct = parseFloat(performance.max_drawdown || 0);
+    if (drawdownPct >= this.config.circuitBreakerDrawdown) {
+      this.isPaused = true;
+      this.logger.warn(`🚨 CIRCUIT BREAKER! Drawdown ${drawdownPct}% >= ${this.config.circuitBreakerDrawdown}% — Trading pausiert. /resume zum Fortsetzen.`);
+      if (typeof this.onCircuitBreaker === 'function') {
+        this.onCircuitBreaker(drawdownPct, this.wallet.getState().totalValue);
+      }
+      return;
+    }
+
     // 4. Ask AI for trading decisions
     const decisions = await this.getAIDecisions(marketData, portfolioState, performance);
 
-    // 5. Execute decisions
-    for (const decision of decisions) {
-      await this.executeDecision(decision, marketData);
-    }
+    // 5. Execute decisions in parallel (unabhängige Orders für verschiedene Symbole)
+    await Promise.all(decisions.map(d => this.executeDecision(d, marketData)));
 
     // 6. Self-improvement cycle
     if (this.tradeCount > 0 && this.tradeCount % this.config.improvementCycle === 0) {
@@ -136,8 +154,12 @@ class TradingAgent {
 
     try {
       const parsed = JSON.parse(response);
-      this.logger.info('🤖 AI decisions received:', parsed.decisions?.length || 0, 'actions');
-      return parsed.decisions || [];
+      if (!this._validateDecisionResponse(parsed)) {
+        this.logger.warn('⚠️ AI response failed schema validation, skipping cycle');
+        return [];
+      }
+      this.logger.info('🤖 AI decisions received:', parsed.decisions.length, 'actions');
+      return parsed.decisions;
     } catch {
       this.logger.warn('Failed to parse AI response, skipping cycle');
       return [];
@@ -225,6 +247,7 @@ Make decisive, well-reasoned trades. If market conditions are unclear, HOLD is v
     const maxAllowed = portfolioState.totalValue * this.config.maxPositionSize;
     const safeAmount = Math.min(amount_usd, maxAllowed);
 
+    let tradeResult;
     try {
       // Echte Order via Coinbase API (Paper: simuliert, Live: real)
       const orderResult = await this.coinbase.executeMarketOrder({
@@ -234,7 +257,6 @@ Make decisive, well-reasoned trades. If market conditions are unclear, HOLD is v
         feeRate:   this.wallet.feeRate,
       });
 
-      let tradeResult;
       if (action === 'BUY') {
         tradeResult = this.wallet.buy(symbol, safeAmount, orderResult);
       } else if (action === 'SELL') {
@@ -265,6 +287,7 @@ Make decisive, well-reasoned trades. If market conditions are unclear, HOLD is v
     } catch (err) {
       this.logger.error(`Order fehlgeschlagen ${action} ${symbol}:`, err.message);
     }
+    return tradeResult;
   }
 
   async selfImprove() {
@@ -313,9 +336,13 @@ Respond with improved strategy as JSON:
 
     try {
       const newStrategy = JSON.parse(response);
+      if (!this._validateStrategy(newStrategy)) {
+        this.logger.warn('⚠️ Improved strategy failed schema validation, keeping current strategy');
+        return;
+      }
       await this.memory.saveStrategy(newStrategy);
       this.currentStrategy = newStrategy;
-      
+
       this.logger.info('✅ Strategy improved:', newStrategy.name);
       this.logger.info('📈 Improvement summary:', newStrategy.improvement_summary);
     } catch {
@@ -374,9 +401,48 @@ Respond with improved strategy as JSON:
     }
   }
 
+  pause() {
+    this.isPaused = true;
+    this.logger.info('⏸️ Agent pausiert (manuell)');
+  }
+
+  resume() {
+    this.isPaused = false;
+    this.logger.info('▶️ Agent fortgesetzt');
+  }
+
   stop() {
     this.isRunning = false;
     this.logger.info('🛑 Trading Agent stopped');
+  }
+
+  /**
+   * Validiert die JSON-Antwort von Claude für Trading-Entscheidungen.
+   * Verhindert, dass fehlerhafte AI-Responses zu falschen Orders führen.
+   */
+  _validateDecisionResponse(parsed) {
+    if (!parsed || typeof parsed !== 'object') return false;
+    if (!Array.isArray(parsed.decisions)) return false;
+    for (const d of parsed.decisions) {
+      if (!['BUY', 'SELL', 'HOLD'].includes(d.action)) return false;
+      if (typeof d.symbol !== 'string' || !d.symbol) return false;
+      if (d.action !== 'HOLD') {
+        if (typeof d.amount_usd !== 'number' || d.amount_usd <= 0) return false;
+      }
+      if (typeof d.confidence !== 'number' || d.confidence < 0 || d.confidence > 1) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Validiert das JSON-Objekt einer neuen Strategie von Claude.
+   */
+  _validateStrategy(strategy) {
+    if (!strategy || typeof strategy !== 'object') return false;
+    if (typeof strategy.name !== 'string' || !strategy.name) return false;
+    if (typeof strategy.version !== 'number') return false;
+    if (!strategy.rules || typeof strategy.rules !== 'object') return false;
+    return true;
   }
 
   sleep(ms) {

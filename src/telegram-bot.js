@@ -182,9 +182,10 @@ ${returnEmoji} <b>Portfolio:</b> $${state.totalValue.toFixed(2)} (${returnSign}$
     const uptime = Math.floor(agent.uptime / 60);
     const returnSign = state.totalReturnPct >= 0 ? '+' : '';
 
+    const stateEmoji = !agent.isRunning ? '🔴 Gestoppt' : agent.isPaused ? '⏸️ Pausiert' : '🟢 Läuft';
     await this.send(`📡 <b>Agent Status</b>
 
-${agent.isRunning ? '🟢 Läuft' : '🔴 Gestoppt'} | Modus: <b>${agent.config.mode.toUpperCase()}</b>
+${stateEmoji} | Modus: <b>${agent.config.mode.toUpperCase()}</b>
 ⏱ Uptime: ${uptime}m | Trades: ${agent.tradeCount}
 
 💼 <b>Portfolio:</b> $${state.totalValue.toFixed(2)}

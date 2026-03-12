@@ -262,8 +262,8 @@ class CoinbaseClient {
   }
 
   /**
-   * LIVE ORDER: echter signed API-Call
-   * GET /brokerage/orders
+   * LIVE ORDER: echter signed API-Call + Polling bis Fill oder Fehler
+   * POST /brokerage/orders → poll GET /brokerage/orders/historical/{id}
    */
   async _executeLiveOrder({ productId, side, quoteSize }) {
     const order = {
@@ -284,16 +284,60 @@ class CoinbaseClient {
     }
 
     const r = data.success_response;
-    return {
-      order_id:       r.order_id,
-      product_id:     productId,
-      side:           side.toUpperCase(),
-      status:         'SUBMITTED',
-      is_paper:       false,
-      quote_size:     quoteSize.toFixed(2),
-      created_at:     new Date().toISOString(),
-      _raw:           r,
-    };
+    // Warten bis Order tatsächlich gefüllt ist (max. 30s)
+    return await this._pollOrderStatus(r.order_id, 30000, quoteSize);
+  }
+
+  /**
+   * Pollt Order-Status bis FILLED, CANCELLED, FAILED oder Timeout (30s).
+   * Gibt dasselbe Format zurück wie _simulatePaperOrder, damit der Agent
+   * in Paper und Live identisch arbeitet.
+   */
+  async _pollOrderStatus(orderId, maxWaitMs = 30000, quoteSize = 0) {
+    const start        = Date.now();
+    const pollInterval = 2000;
+
+    while (Date.now() - start < maxWaitMs) {
+      await new Promise(r => setTimeout(r, pollInterval));
+
+      try {
+        const data  = await this._signedGet(`/brokerage/orders/historical/${orderId}`);
+        const order = data.order;
+        if (!order) continue;
+
+        if (order.status === 'FILLED') {
+          const filledBase  = parseFloat(order.filled_size  || 0);
+          const filledQuote = parseFloat(order.filled_value || 0);
+          const avgFill     = filledBase > 0 ? filledQuote / filledBase : 0;
+          const fee         = parseFloat(order.total_fees   || 0);
+
+          return {
+            order_id:       orderId,
+            product_id:     order.product_id,
+            side:           order.side,
+            status:         'FILLED',
+            is_paper:       false,
+            quote_size:     quoteSize,
+            avg_fill_price: parseFloat(avgFill.toFixed(2)),
+            filled_base:    parseFloat(filledBase.toFixed(8)),
+            filled_quote:   parseFloat(filledQuote.toFixed(2)),
+            fee:            parseFloat(fee.toFixed(6)),
+            fee_rate:       filledQuote > 0 ? fee / filledQuote : 0,
+            slippage_pct:   0,
+            created_at:     order.created_time,
+          };
+        }
+
+        if (['CANCELLED', 'FAILED', 'EXPIRED'].includes(order.status)) {
+          throw new Error(`Order ${orderId} fehlgeschlagen mit Status: ${order.status}`);
+        }
+      } catch (err) {
+        if (err.message.includes('fehlgeschlagen mit Status')) throw err;
+        // Netzwerkfehler → nächster Versuch
+      }
+    }
+
+    throw new Error(`Order ${orderId} Polling Timeout nach ${maxWaitMs}ms — Order-Status manuell prüfen`);
   }
 
   /**

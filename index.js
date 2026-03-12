@@ -17,6 +17,7 @@ const CONFIG = {
   riskPerTrade: parseFloat(process.env.RISK_PER_TRADE || '0.02'),
   improvementCycle: parseInt(process.env.IMPROVEMENT_CYCLE || '10'),
   decisionInterval: parseInt(process.env.DECISION_INTERVAL || '60000'),
+  circuitBreakerDrawdown: parseFloat(process.env.CIRCUIT_BREAKER_DRAWDOWN || '20'),
   dashboardPort: parseInt(process.env.DASHBOARD_PORT || '3000'),
   coinbaseApiKey: process.env.COINBASE_API_KEY,
   coinbaseApiSecret: process.env.COINBASE_API_SECRET,
@@ -60,6 +61,17 @@ agent.recordPerformanceSnapshot = () => {
   }
 };
 
+// Circuit Breaker Callback: Telegram-Alert wenn Trading pausiert wird
+agent.onCircuitBreaker = async (drawdownPct, portfolioValue) => {
+  await telegram.send(`🚨 <b>CIRCUIT BREAKER ausgelöst!</b>
+
+📉 Drawdown: <b>${drawdownPct.toFixed(2)}%</b> (Limit: ${CONFIG.circuitBreakerDrawdown}%)
+💼 Portfolio: $${portfolioValue.toFixed(2)}
+
+⏸️ <b>Trading wurde automatisch pausiert.</b>
+Sende /resume um fortzufahren — oder prüfe zuerst die Marktlage!`);
+};
+
 // Dashboard API
 const server = http.createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -67,7 +79,7 @@ const server = http.createServer((req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
 
   const routes = {
-    '/api/status': () => ({ running: agent.isRunning, mode: CONFIG.mode, tradeCount: agent.tradeCount, strategy: agent.currentStrategy?.name || 'Default', uptime: Math.floor(process.uptime()), telegram: telegram.enabled, fee: { taker: agent.wallet.feeRate, taker_pct: (agent.wallet.feeRate * 100).toFixed(2) + '%', total_paid: agent.wallet.totalFeePaid, tier: agent.db.getMeta('fee_tier', 'unknown'), source: agent.db.getMeta('fee_source', 'unknown') } }),
+    '/api/status': () => ({ running: agent.isRunning, paused: agent.isPaused, mode: CONFIG.mode, tradeCount: agent.tradeCount, strategy: agent.currentStrategy?.name || 'Default', uptime: Math.floor(process.uptime()), telegram: telegram.enabled, circuitBreaker: { drawdownLimit: CONFIG.circuitBreakerDrawdown }, fee: { taker: agent.wallet.feeRate, taker_pct: (agent.wallet.feeRate * 100).toFixed(2) + '%', total_paid: agent.wallet.totalFeePaid, tier: agent.db.getMeta('fee_tier', 'unknown'), source: agent.db.getMeta('fee_source', 'unknown') } }),
     '/api/portfolio': () => agent.wallet.getState(),
     '/api/performance': () => agent.getPerformanceMetrics(),
     '/api/trades': () => agent.memory.getRecentTrades(50),
