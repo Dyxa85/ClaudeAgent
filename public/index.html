@@ -330,6 +330,40 @@
     display: flex; justify-content: space-between; align-items: center;
   }
 
+  /* Allocation bar */
+  .alloc-wrap {
+    margin: 0 20px 0;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 14px 16px;
+  }
+  .alloc-label { font-size: 9px; color: var(--muted); letter-spacing: 0.12em; margin-bottom: 10px; }
+  .alloc-bar {
+    display: flex; height: 8px; border-radius: 4px; overflow: hidden; gap: 1px;
+    margin-bottom: 10px;
+  }
+  .alloc-segment { height: 100%; transition: width 0.4s ease; border-radius: 2px; }
+  .alloc-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+  .alloc-item { display: flex; align-items: center; gap: 5px; font-size: 10px; color: var(--text); }
+  .alloc-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+
+  /* Fee / budget row */
+  .info-row {
+    display: flex; gap: 8px;
+    padding: 10px 20px 0;
+  }
+  .info-chip {
+    flex: 1;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 10px 12px;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .info-chip-label { font-size: 8px; color: var(--muted); letter-spacing: 0.1em; }
+  .info-chip-val { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 14px; color: #fff; }
+
   /* Spinneranimation */
   @keyframes spin { to { transform: rotate(360deg); } }
   .loading { animation: spin 1s linear infinite; display: inline-block; }
@@ -381,6 +415,29 @@
       <canvas id="chart" height="80"></canvas>
     </div>
 
+    <!-- Allocation Bar -->
+    <div class="alloc-wrap" id="allocWrap">
+      <div class="alloc-label">PORTFOLIO ALLOKATION</div>
+      <div class="alloc-bar" id="allocBar"></div>
+      <div class="alloc-legend" id="allocLegend"></div>
+    </div>
+
+    <!-- Fee + Budget info chips -->
+    <div class="info-row">
+      <div class="info-chip">
+        <div class="info-chip-label">STARTKAPITAL</div>
+        <div class="info-chip-val" id="chipInitial">$—</div>
+      </div>
+      <div class="info-chip">
+        <div class="info-chip-label">GEBÜHREN BEZAHLT</div>
+        <div class="info-chip-val" id="chipFees">$—</div>
+      </div>
+      <div class="info-chip">
+        <div class="info-chip-label">FEE-RATE</div>
+        <div class="info-chip-val" id="chipFeeRate">—</div>
+      </div>
+    </div>
+
     <!-- Metrics -->
     <div class="metrics">
       <div class="metric" style="--accent-line: var(--green)">
@@ -415,8 +472,18 @@
       </div>
       <div id="positionsList"></div>
       <div class="cash-card" style="margin-top:4px">
-        <span style="color:var(--muted); font-size:11px">CASH RESERVE</span>
-        <span style="font-family:'Syne',sans-serif; font-weight:700; color:#fff; font-size:16px" id="cashVal">$—</span>
+        <div>
+          <div style="color:var(--muted); font-size:10px; letter-spacing:0.1em">CASH RESERVE</div>
+          <div style="font-size:10px; color:var(--muted); margin-top:2px" id="cashPct">—% des Portfolios</div>
+        </div>
+        <span style="font-family:'Syne',sans-serif; font-weight:700; color:#fff; font-size:18px" id="cashVal">$—</span>
+      </div>
+      <div class="cash-card" style="margin-top:8px">
+        <div>
+          <div style="color:var(--muted); font-size:10px; letter-spacing:0.1em">INVESTIERT</div>
+          <div style="font-size:10px; color:var(--muted); margin-top:2px" id="investedPct">—% des Portfolios</div>
+        </div>
+        <span style="font-family:'Syne',sans-serif; font-weight:700; color:var(--accent); font-size:18px" id="investedVal">$—</span>
       </div>
     </div>
   </div>
@@ -475,9 +542,9 @@ let chartCtx;
 
 // Demo-Daten wenn API nicht erreichbar
 const DEMO = {
-  portfolio: { totalValue: 11366.20, totalReturnPct: 13.66, cashBalance: 3241.87, positions: [
-    { symbol: 'BTC-USD', quantity: 0.04821, avgPrice: 64200, currentPrice: 65847, currentValue: 3173.04, unrealizedPnL: 79.40, unrealizedPnLPct: 2.57 },
-    { symbol: 'ETH-USD', quantity: 1.234, avgPrice: 3150, currentPrice: 3287, currentValue: 4056.08, unrealizedPnL: 169.07, unrealizedPnLPct: 4.35 },
+  portfolio: { totalValue: 11366.20, totalReturnPct: 13.66, cashBalance: 3241.87, positionsValue: 8124.33, totalFeePaid: 12.40, feeRate: 0.006, positions: [
+    { symbol: 'BTC-USD', quantity: 0.04821, avg_price: 64200, current_price: 65847, current_value: 3173.04, cost_basis: 3093.64, unrealized_pnl: 79.40, unrealized_pnl_pct: 2.57 },
+    { symbol: 'ETH-USD', quantity: 1.234, avg_price: 3150, current_price: 3287, current_value: 4056.08, cost_basis: 3887.01, unrealized_pnl: 169.07, unrealized_pnl_pct: 4.35 },
   ]},
   performance: { win_rate: 62.5, sharpe_ratio: 1.87, avg_profit_per_trade: 18.44, max_drawdown: 4.21, total_trades: 47 },
 };
@@ -547,10 +614,13 @@ function drawChart(data) {
 }
 
 // ─── Render Portfolio ─────────────────────────────────────────────────────────
-function renderPortfolio(data, perf) {
+let _initialBalance = null; // cached from /api/status
+
+function renderPortfolio(data, perf, status) {
   const val = data.totalValue || 0;
   const ret = data.totalReturnPct || 0;
-  const initial = val / (1 + ret / 100);
+  const initial = status?.initialBalance || _initialBalance || (val / (1 + ret / 100));
+  if (status?.initialBalance) _initialBalance = status.initialBalance;
   const absReturn = val - initial;
 
   document.getElementById('heroValue').textContent = fmtUSD(val);
@@ -558,6 +628,14 @@ function renderPortfolio(data, perf) {
   retEl.className = 'hero-return ' + (ret >= 0 ? 'up' : 'down');
   document.getElementById('heroReturnVal').textContent = fmtPct(ret);
   document.getElementById('heroReturnAbs').textContent = (absReturn >= 0 ? '+' : '') + fmtUSD(absReturn);
+
+  // Chips
+  document.getElementById('chipInitial').textContent = fmtUSD(initial);
+  document.getElementById('chipFees').textContent = fmtUSD(data.totalFeePaid || 0);
+  document.getElementById('chipFeeRate').textContent = data.feeRate ? (data.feeRate * 100).toFixed(2) + '%' : '—';
+
+  // Allocation bar
+  renderAllocation(data);
 
   if (perf) {
     document.getElementById('winRate').textContent = perf.win_rate + '%';
@@ -568,31 +646,76 @@ function renderPortfolio(data, perf) {
   }
 }
 
+// ─── Allocation Bar ───────────────────────────────────────────────────────────
+const ALLOC_COLORS = ['#f7931a','#627eea','#9945ff','#00c896','#ff6b35'];
+function renderAllocation(data) {
+  const total = data.totalValue || 1;
+  const cash = data.cashBalance || 0;
+  const positions = data.positions || [];
+
+  const segments = [
+    { label: 'Cash', value: cash, color: '#4a6578' },
+    ...positions.map((p, i) => ({
+      label: p.symbol.split('-')[0],
+      value: p.current_value,
+      color: COIN_COLORS[p.symbol] || ALLOC_COLORS[i % ALLOC_COLORS.length],
+    })),
+  ];
+
+  const bar = document.getElementById('allocBar');
+  const legend = document.getElementById('allocLegend');
+
+  bar.innerHTML = segments.map(s => {
+    const pct = (s.value / total * 100).toFixed(1);
+    return `<div class="alloc-segment" style="width:${pct}%;background:${s.color};min-width:${pct > 0 ? '4px' : '0'}"></div>`;
+  }).join('');
+
+  legend.innerHTML = segments.map(s => {
+    const pct = (s.value / total * 100).toFixed(1);
+    return `<div class="alloc-item"><div class="alloc-dot" style="background:${s.color}"></div>${s.label} <span style="color:var(--muted)">${pct}%</span></div>`;
+  }).join('');
+}
+
 // ─── Render Positions ─────────────────────────────────────────────────────────
 function renderPositions(data) {
   const container = document.getElementById('positionsList');
-  document.getElementById('posCount').textContent = data.positions?.length || 0;
-  document.getElementById('cashVal').textContent = fmtUSD(data.cashBalance || 0);
+  const positions = data.positions || [];
+  const total = data.totalValue || 1;
+  document.getElementById('posCount').textContent = positions.length;
 
-  if (!data.positions?.length) {
+  const cash = data.cashBalance || 0;
+  const invested = data.positionsValue || 0;
+  document.getElementById('cashVal').textContent = fmtUSD(cash);
+  document.getElementById('cashPct').textContent = (cash / total * 100).toFixed(1) + '% des Portfolios';
+  document.getElementById('investedVal').textContent = fmtUSD(invested);
+  document.getElementById('investedPct').textContent = (invested / total * 100).toFixed(1) + '% des Portfolios';
+
+  if (!positions.length) {
     container.innerHTML = '<div style="text-align:center;padding:40px;color:var(--muted)">Keine offenen Positionen</div>';
     return;
   }
 
-  container.innerHTML = data.positions.map(p => {
+  container.innerHTML = positions.map(p => {
     const icon = COIN_ICONS[p.symbol] || COIN_ICONS.default;
     const color = COIN_COLORS[p.symbol] || COIN_COLORS.default;
-    const up = p.unrealizedPnL >= 0;
+    const pnl = p.unrealized_pnl ?? p.unrealizedPnL ?? 0;
+    const pnlPct = p.unrealized_pnl_pct ?? p.unrealizedPnLPct ?? 0;
+    const avgPrice = p.avg_price ?? p.avgPrice ?? 0;
+    const curPrice = p.current_price ?? p.currentPrice ?? 0;
+    const curValue = p.current_value ?? p.currentValue ?? 0;
+    const up = pnl >= 0;
+    const pctOfTotal = (curValue / total * 100).toFixed(1);
     return `
       <div class="position-card">
         <div class="pos-icon" style="background:${color}22; color:${color}">${icon}</div>
         <div class="pos-info">
           <div class="pos-symbol">${p.symbol.split('-')[0]}</div>
-          <div class="pos-qty">${p.quantity.toFixed(6)} · ⌀${fmtUSD(p.avgPrice)}</div>
+          <div class="pos-qty">${p.quantity.toFixed(6)} ·  ⌀${fmtUSD(avgPrice)}</div>
+          <div class="pos-qty" style="margin-top:2px">Kurs ${fmtUSD(curPrice)} · ${pctOfTotal}% Portfolio</div>
         </div>
         <div class="pos-values">
-          <div class="pos-value">${fmtUSD(p.currentValue)}</div>
-          <div class="pos-pnl ${up ? 'up' : 'down'}">${up ? '▲' : '▼'} ${fmtPct(p.unrealizedPnLPct)}</div>
+          <div class="pos-value">${fmtUSD(curValue)}</div>
+          <div class="pos-pnl ${up ? 'up' : 'down'}">${up ? '▲' : '▼'} ${fmtPct(pnlPct)} (${up ? '+' : ''}${fmtUSD(pnl)})</div>
         </div>
       </div>`;
   }).join('');
@@ -663,7 +786,7 @@ async function refresh() {
   const p = portfolio || DEMO.portfolio;
   const pf = perf || DEMO.performance;
 
-  renderPortfolio(p, pf);
+  renderPortfolio(p, pf, status);
   renderPositions(p);
   if (trades) renderTrades(trades);
   if (strategy) renderStrategy(strategy);

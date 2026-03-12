@@ -79,7 +79,7 @@ const server = http.createServer((req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
 
   const routes = {
-    '/api/status': () => ({ running: agent.isRunning, paused: agent.isPaused, mode: CONFIG.mode, tradeCount: agent.tradeCount, strategy: agent.currentStrategy?.name || 'Default', uptime: Math.floor(process.uptime()), telegram: telegram.enabled, circuitBreaker: { drawdownLimit: CONFIG.circuitBreakerDrawdown }, fee: { taker: agent.wallet.feeRate, taker_pct: (agent.wallet.feeRate * 100).toFixed(2) + '%', total_paid: agent.wallet.totalFeePaid, tier: agent.db.getMeta('fee_tier', 'unknown'), source: agent.db.getMeta('fee_source', 'unknown') } }),
+    '/api/status': () => ({ running: agent.isRunning, paused: agent.isPaused, mode: CONFIG.mode, initialBalance: CONFIG.initialBalance, tradeCount: agent.tradeCount, strategy: agent.currentStrategy?.name || 'Default', uptime: Math.floor(process.uptime()), telegram: telegram.enabled, circuitBreaker: { drawdownLimit: CONFIG.circuitBreakerDrawdown }, fee: { taker: agent.wallet.feeRate, taker_pct: (agent.wallet.feeRate * 100).toFixed(2) + '%', total_paid: agent.wallet.totalFeePaid, tier: agent.db.getMeta('fee_tier', 'unknown'), source: agent.db.getMeta('fee_source', 'unknown') } }),
     '/api/portfolio': () => agent.wallet.getState(),
     '/api/performance': () => agent.getPerformanceMetrics(),
     '/api/trades': () => agent.memory.getRecentTrades(50),
