@@ -104,7 +104,8 @@ class CoinbaseClient {
    * Wichtig für Paper-Mode: wir simulieren Slippage anhand echter Orderbuch-Tiefe
    */
   async getOrderBook(productId, limit = 10) {
-    const data = await this._publicGet(`/products/${productId}/book?limit=${limit}`);
+    // Orderbook ist nicht im Public Market API — benötigt Auth
+    const data = await this._signedGet(`/brokerage/products/${productId}/book?limit=${limit}`);
     return {
       bids: (data.bids || []).map(b => ({ price: parseFloat(b.price), size: parseFloat(b.size) })),
       asks: (data.asks || []).map(a => ({ price: parseFloat(a.price), size: parseFloat(a.size) })),
