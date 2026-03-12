@@ -5,11 +5,66 @@
 
 require('dotenv').config();
 
-const http = require('http');
-const fs   = require('fs');
-const path = require('path');
+const http   = require('http');
+const fs     = require('fs');
+const path   = require('path');
+const crypto = require('crypto');
 const { TradingAgent } = require('./src/agent');
 const { TelegramBot }  = require('./src/telegram-bot');
+
+// ─── Session Auth (replaces nginx basic auth — works on iOS Safari) ──────────
+
+const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || 'trader';
+const sessions           = new Map(); // sessionId → expiresAt
+
+function _createSession() {
+  const id = crypto.randomBytes(16).toString('hex');
+  sessions.set(id, Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+  return id;
+}
+
+function _isAuthenticated(req) {
+  const cookie = req.headers.cookie || '';
+  const match  = cookie.match(/sid=([a-f0-9]{32})/);
+  if (!match) return false;
+  const expiry = sessions.get(match[1]);
+  if (!expiry || expiry < Date.now()) { sessions.delete(match && match[1]); return false; }
+  return true;
+}
+
+function _parsePOSTBody(req) {
+  return new Promise(resolve => {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end',  ()    => { resolve(Object.fromEntries(new URLSearchParams(body))); });
+  });
+}
+
+const LOGIN_HTML = `<!DOCTYPE html><html lang="de">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Trading Agent — Login</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0f1117;display:flex;align-items:center;justify-content:center;min-height:100vh;font-family:-apple-system,sans-serif}
+  .card{background:#1a1d27;border:1px solid #2a2d3a;border-radius:16px;padding:40px;width:100%;max-width:360px;text-align:center}
+  h1{color:#fff;font-size:1.4rem;margin-bottom:8px}
+  p{color:#888;font-size:.85rem;margin-bottom:28px}
+  input{width:100%;background:#0f1117;border:1px solid #2a2d3a;border-radius:8px;color:#fff;font-size:1rem;padding:12px 14px;outline:none;margin-bottom:16px;transition:border .2s}
+  input:focus{border-color:#3b82f6}
+  button{width:100%;background:#3b82f6;border:none;border-radius:8px;color:#fff;cursor:pointer;font-size:1rem;font-weight:600;padding:12px;transition:background .2s}
+  button:hover{background:#2563eb}
+  .err{color:#ef4444;font-size:.85rem;margin-top:12px;display:none}
+  .err.show{display:block}
+</style></head>
+<body><div class="card">
+  <h1>📊 Trading Agent</h1>
+  <p>Passwort eingeben um fortzufahren</p>
+  <form method="POST" action="/login">
+    <input type="password" name="password" placeholder="Passwort" autofocus autocomplete="current-password">
+    <button type="submit">Einloggen</button>
+    <div class="err" id="err">__ERR__</div>
+  </form>
+</div></body></html>`;
 
 const CONFIG = {
   mode:                  process.env.TRADING_MODE    || 'paper',
@@ -136,9 +191,43 @@ async function syncCoinbasePortfolio() {
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
-const server = http.createServer((req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+const server = http.createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+
+  // ── Auth: /api/health is always public ───────────────────────────────────
+  const isHealthCheck = req.url === '/api/health';
+  if (!isHealthCheck) {
+
+    // ── Login page ──────────────────────────────────────────────────────────
+    if (req.url === '/login' && req.method === 'GET') {
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.end(LOGIN_HTML.replace('__ERR__', ''));
+      return;
+    }
+
+    if (req.url === '/login' && req.method === 'POST') {
+      const body = await _parsePOSTBody(req);
+      if (body.password === DASHBOARD_PASSWORD) {
+        const sid = _createSession();
+        res.setHeader('Set-Cookie', `sid=${sid}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${7*24*3600}`);
+        res.setHeader('Location', '/');
+        res.statusCode = 302;
+        res.end();
+      } else {
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.end(LOGIN_HTML.replace('style="display:none"', '').replace('__ERR__', 'Falsches Passwort'));
+      }
+      return;
+    }
+
+    // ── Redirect to login if not authenticated ──────────────────────────────
+    if (!_isAuthenticated(req)) {
+      res.setHeader('Location', '/login');
+      res.statusCode = 302;
+      res.end();
+      return;
+    }
+  }
 
   // ── Static File Serving ──────────────────────────────────────────────────
   if (!req.url.startsWith('/api/')) {
