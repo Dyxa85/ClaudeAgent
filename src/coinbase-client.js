@@ -13,7 +13,9 @@
 
 'use strict';
 
-const BASE_URL = 'https://api.coinbase.com/api/v3';
+const BASE_URL        = 'https://api.coinbase.com/api/v3';
+// Öffentliche Market-Data Endpoints — kein API-Key nötig
+const MARKET_BASE_URL = 'https://api.coinbase.com/api/v3/brokerage/market';
 
 class CoinbaseClient {
   constructor(config = {}) {
@@ -46,7 +48,7 @@ class CoinbaseClient {
    * GET /brokerage/products/{product_id}
    */
   async getTicker(productId) {
-    const data = await this._marketGet(`/brokerage/products/${productId}`);
+    const data = await this._publicGet(`/products/${productId}`);
     const price = parseFloat(data.price);
     const bid   = parseFloat(data.best_bid);
     const ask   = parseFloat(data.best_ask);
@@ -78,8 +80,8 @@ class CoinbaseClient {
     const end   = Math.floor(Date.now() / 1000);
     const start = end - seconds * limit;
 
-    const data = await this._marketGet(
-      `/brokerage/products/${productId}/candles?start=${start}&end=${end}&granularity=${granularity}`
+    const data = await this._publicGet(
+      `/products/${productId}/candles?start=${start}&end=${end}&granularity=${granularity}`
     );
 
     const candles = (data.candles || []).map(c => ({
@@ -102,7 +104,7 @@ class CoinbaseClient {
    * Wichtig für Paper-Mode: wir simulieren Slippage anhand echter Orderbuch-Tiefe
    */
   async getOrderBook(productId, limit = 10) {
-    const data = await this._marketGet(`/brokerage/products/${productId}/book?limit=${limit}`);
+    const data = await this._publicGet(`/products/${productId}/book?limit=${limit}`);
     return {
       bids: (data.bids || []).map(b => ({ price: parseFloat(b.price), size: parseFloat(b.size) })),
       asks: (data.asks || []).map(a => ({ price: parseFloat(a.price), size: parseFloat(a.size) })),
@@ -114,7 +116,7 @@ class CoinbaseClient {
    * GET /brokerage/products/{product_id}
    */
   async getProductInfo(productId) {
-    const data = await this._marketGet(`/brokerage/products/${productId}`);
+    const data = await this._publicGet(`/products/${productId}`);
     return {
       symbol:          data.product_id,
       base_currency:   data.base_currency_id,
@@ -362,9 +364,21 @@ class CoinbaseClient {
     return this._request(path, 'GET', null, false);
   }
 
-  // Marktdaten: mit Auth wenn API-Key vorhanden (Coinbase v3 erfordert Auth für /brokerage/products)
-  async _marketGet(path) {
-    return this._request(path, 'GET', null, !!(this.apiKey && this.apiSecret));
+  // Öffentliche Marktdaten — kein Auth, direkt gegen MARKET_BASE_URL
+  async _publicGet(path) {
+    const now  = Date.now();
+    const wait = this._minInterval - (now - this._lastRequest);
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    this._lastRequest = Date.now();
+
+    const res = await fetch(`${MARKET_BASE_URL}${path}`, {
+      headers: { 'Content-Type': 'application/json', 'User-Agent': 'TradingAgent/1.0' },
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`Coinbase Market API ${res.status} auf GET ${path}: ${text.slice(0, 200)}`);
+    }
+    return res.json();
   }
 
   async _signedGet(path) {
