@@ -200,6 +200,27 @@ class Persistence {
                       || this.db.prepare("SELECT MAX(id) as m FROM epochs").get().m || 1;
         this.db.prepare("INSERT OR IGNORE INTO agent_meta (key,value) VALUES ('current_epoch_id',?)").run(String(maxEpoch));
       }
+
+      // One-time upgrade: falls wir noch in Epoche 1 stecken, aber Altdaten vorhanden sind
+      // (tritt auf wenn erster Migrations-Run vor dieser Logik deployted wurde)
+      const currentIdRow = this.db.prepare("SELECT value FROM agent_meta WHERE key='current_epoch_id'").get();
+      if (currentIdRow && currentIdRow.value === '1') {
+        const ep1 = this.db.prepare("SELECT * FROM epochs WHERE id = 1").get();
+        const hasLegacyTrades = this.db.prepare("SELECT COUNT(*) as c FROM trades WHERE epoch_id = 1").get().c > 0;
+        if (ep1 && hasLegacyTrades) {
+          // Epoche 1 archivieren und Epoche 2 starten
+          this.db.prepare("UPDATE epochs SET archived_at = datetime('now'), reason = 'legacy' WHERE id = 1").run();
+          const existingEp2 = this.db.prepare("SELECT id FROM epochs WHERE id = 2").get();
+          if (!existingEp2) {
+            this.db.prepare(`
+              INSERT INTO epochs (id, started_at, reason, label)
+              VALUES (2, datetime('now'), 'initial', 'Epoche 2 — erster sauberer Start')
+            `).run();
+          }
+          this.db.prepare("UPDATE agent_meta SET value = '2' WHERE key = 'current_epoch_id'").run();
+          console.log('🗂️  Upgrade: Epoche 1 (Altdaten) archiviert → aktiv: Epoche 2');
+        }
+      }
     });
     txn();
   }
