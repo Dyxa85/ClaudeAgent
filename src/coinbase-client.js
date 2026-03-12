@@ -419,7 +419,8 @@ class CoinbaseClient {
     const keyId    = this.apiKey;
     const secret   = this.apiSecret;
     const now      = Math.floor(Date.now() / 1000);
-    const uri      = `${method.toUpperCase()} api.coinbase.com${path.split('?')[0]}`;
+    // URI muss den vollen Pfad inkl. /api/v3 enthalten (BASE_URL-Prefix)
+    const uri      = `${method.toUpperCase()} api.coinbase.com/api/v3${path.split('?')[0]}`;
 
     const header  = Buffer.from(JSON.stringify({ alg: 'ES256', kid: keyId, nonce: now.toString() })).toString('base64url');
     const payload = Buffer.from(JSON.stringify({ sub: keyId, iss: 'cdp', nbf: now, exp: now + 120, uri })).toString('base64url');
