@@ -95,7 +95,6 @@ class Persistence {
         timestamp       TEXT    NOT NULL
       );
 
-      CREATE INDEX IF NOT EXISTS trades_epoch     ON trades(epoch_id);
       CREATE INDEX IF NOT EXISTS trades_symbol    ON trades(symbol);
       CREATE INDEX IF NOT EXISTS trades_action    ON trades(action);
       CREATE INDEX IF NOT EXISTS trades_timestamp ON trades(timestamp);
@@ -120,8 +119,6 @@ class Persistence {
         value     REAL    NOT NULL,
         timestamp TEXT    NOT NULL DEFAULT (datetime('now'))
       );
-
-      CREATE INDEX IF NOT EXISTS snapshots_epoch ON performance_snapshots(epoch_id);
 
       -- Ältere Snapshots automatisch bereinigen (nur letzte 50.000 gesamt)
       CREATE TRIGGER IF NOT EXISTS trim_snapshots
@@ -156,13 +153,18 @@ class Persistence {
 
       if (!tradeCols.includes('epoch_id')) {
         this.db.exec("ALTER TABLE trades ADD COLUMN epoch_id INTEGER NOT NULL DEFAULT 1");
+        this.db.exec("CREATE INDEX IF NOT EXISTS trades_epoch ON trades(epoch_id)");
       }
       if (!snapshotCols.includes('epoch_id')) {
         this.db.exec("ALTER TABLE performance_snapshots ADD COLUMN epoch_id INTEGER NOT NULL DEFAULT 1");
+        this.db.exec("CREATE INDEX IF NOT EXISTS snapshots_epoch ON performance_snapshots(epoch_id)");
       }
       if (!stratCols.includes('epoch_id')) {
         this.db.exec("ALTER TABLE strategies ADD COLUMN epoch_id INTEGER NOT NULL DEFAULT 1");
       }
+      // Ensure indexes exist on fresh DBs too (tables were just created with the column)
+      this.db.exec("CREATE INDEX IF NOT EXISTS trades_epoch    ON trades(epoch_id)");
+      this.db.exec("CREATE INDEX IF NOT EXISTS snapshots_epoch ON performance_snapshots(epoch_id)");
 
       // Epoche 1 eintragen falls noch keine Epochen vorhanden
       const epochCount = this.db.prepare("SELECT COUNT(*) as c FROM epochs").get().c;
