@@ -166,19 +166,25 @@ class Persistence {
       this.db.exec("CREATE INDEX IF NOT EXISTS trades_epoch    ON trades(epoch_id)");
       this.db.exec("CREATE INDEX IF NOT EXISTS snapshots_epoch ON performance_snapshots(epoch_id)");
 
-      // Epoche 1 eintragen falls noch keine Epochen vorhanden
+      // Epochen bootstrap — nur beim allerersten Start
       const epochCount = this.db.prepare("SELECT COUNT(*) as c FROM epochs").get().c;
       if (epochCount === 0) {
         const tradeCount = this.db.prepare("SELECT COUNT(*) as c FROM trades").get().c;
         if (tradeCount > 0) {
-          // Altdaten existieren → als "legacy" Epoche 0 markieren, dann neue starten
+          // Altdaten existieren → sofort als archivierte Legacy-Epoche anlegen
+          // und danach direkt Epoche 2 als aktive Epoche starten
           this.db.prepare(`
-            INSERT INTO epochs (id, started_at, reason, label, initial_balance)
-            VALUES (1, datetime('now'), 'legacy', 'Legacy (vor Epoch-System)', NULL)
+            INSERT INTO epochs (id, started_at, reason, label, archived_at)
+            VALUES (1, datetime('now'), 'legacy', 'Legacy (Altdaten, archiviert)', datetime('now'))
           `).run();
-          console.log('🗂️  Legacy-Daten als Epoche 1 archiviert');
+          this.db.prepare(`
+            INSERT INTO epochs (id, started_at, reason, label)
+            VALUES (2, datetime('now'), 'initial', 'Epoche 2 — erster sauberer Start')
+          `).run();
+          this.db.prepare("INSERT OR IGNORE INTO agent_meta (key,value) VALUES ('current_epoch_id','2')").run();
+          console.log('🗂️  Altdaten als Epoche 1 archiviert → starte sauber mit Epoche 2');
         } else {
-          // Frische DB → direkt Epoche 1 als aktiv starten
+          // Frische DB ohne Altdaten → Epoche 1 direkt aktiv
           this.db.prepare(`
             INSERT INTO epochs (id, started_at, reason, label)
             VALUES (1, datetime('now'), 'initial', 'Epoche 1 — Start')
@@ -187,10 +193,11 @@ class Persistence {
         }
       }
 
-      // Sicherstellen, dass current_epoch_id gesetzt ist
+      // Sicherstellen, dass current_epoch_id gesetzt ist (Fallback)
       const epochMeta = this.db.prepare("SELECT value FROM agent_meta WHERE key='current_epoch_id'").get();
       if (!epochMeta) {
-        const maxEpoch = this.db.prepare("SELECT MAX(id) as m FROM epochs").get().m || 1;
+        const maxEpoch = this.db.prepare("SELECT MAX(id) as m FROM epochs WHERE archived_at IS NULL").get().m
+                      || this.db.prepare("SELECT MAX(id) as m FROM epochs").get().m || 1;
         this.db.prepare("INSERT OR IGNORE INTO agent_meta (key,value) VALUES ('current_epoch_id',?)").run(String(maxEpoch));
       }
     });
