@@ -9,8 +9,8 @@
 // Modell-Konfiguration — über ENV überschreibbar
 const DECISION_MODEL = process.env.AI_DECISION_MODEL || 'claude-haiku-4-5';
 const IMPROVE_MODEL  = process.env.AI_IMPROVE_MODEL  || 'claude-sonnet-4-20250514';
-const DECISION_TOKENS = parseInt(process.env.AI_DECISION_TOKENS || '600',  10);
-const IMPROVE_TOKENS  = parseInt(process.env.AI_IMPROVE_TOKENS  || '1200', 10);
+const DECISION_TOKENS = parseInt(process.env.AI_DECISION_TOKENS || '900',  10);
+const IMPROVE_TOKENS  = parseInt(process.env.AI_IMPROVE_TOKENS  || '1500', 10);
 
 class AnthropicClient {
   constructor(config = {}) {
@@ -91,7 +91,12 @@ class AnthropicClient {
       .join('');
 
     if (responseFormat === 'json') {
-      return text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+      // Strip markdown fences
+      let cleaned = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+      // If Haiku added text before/after the JSON object, extract the JSON block
+      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+      if (jsonMatch) cleaned = jsonMatch[0];
+      return cleaned;
     }
     return text;
   }

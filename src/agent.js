@@ -252,7 +252,9 @@ class TradingAgent {
       this.logger.info('🤖 AI decisions received:', parsed.decisions.length, 'actions');
       return parsed.decisions;
     } catch {
-      this.logger.warn('Failed to parse AI response, skipping cycle');
+      // Log first 300 chars of response to diagnose what model returned
+      const preview = (response || '').substring(0, 300).replace(/\n/g, ' ');
+      this.logger.warn(`Failed to parse AI response (${(response || '').length} chars): ${preview}`);
       return [];
     }
   }
