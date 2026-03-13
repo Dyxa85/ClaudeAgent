@@ -322,15 +322,20 @@ RESPONSE FORMAT — valid JSON only:
   buildDecisionPrompt(marketData, portfolioState, performance) {
     // Compact market data — saves ~40% tokens vs raw JSON.stringify
     const mkLines = Object.entries(marketData).map(([sym, d]) => {
-      const ind = d.indicators || {};
+      const i1h = d.indicators_1h || {};
+      const i4h = d.indicators_4h || {};
+      const macd1h = i1h.macd || {};
+      const bb1h   = i1h.bb   || {};
+      const atr1h  = i1h.atr  || {};
       return [
         `${sym}: $${d.price?.toFixed(2) || 'n/a'}`,
-        `  change24h=${d.change_24h?.toFixed(2)}%`,
-        `  vol=$${(d.volume_24h / 1e6)?.toFixed(1)}M`,
-        `  rsi=${ind.rsi?.toFixed(1) || 'n/a'}`,
-        `  macd=${ind.macd?.toFixed(4) || 'n/a'}/signal=${ind.macd_signal?.toFixed(4) || 'n/a'}`,
-        `  bb_pos=${ind.bb_position?.toFixed(2) || 'n/a'}`,
-        `  trend=${d.trend || 'n/a'}  sentiment=${d.sentiment || 'n/a'}`,
+        `  change24h=${d.price_change_24h?.toFixed(2) ?? 'n/a'}%  vol=$${d.volume_24h ? (d.volume_24h / 1e6).toFixed(1) : 'n/a'}M`,
+        `  spread=${d.spread_pct?.toFixed(3) ?? 'n/a'}%  regime=${d.regime || 'n/a'}`,
+        `  1h: rsi=${i1h.rsi_14?.toFixed(1) ?? 'n/a'}  ema_cross=${i1h.ema_cross || 'n/a'}  vol_ratio=${i1h.volume_ratio?.toFixed(2) ?? 'n/a'}`,
+        `  1h macd=${macd1h.macd?.toFixed(4) ?? 'n/a'}/sig=${macd1h.signal?.toFixed(4) ?? 'n/a'} (${macd1h.crossover || macd1h.trend || 'n/a'})`,
+        `  1h bb_pos=${bb1h.position?.toFixed(2) ?? 'n/a'}  squeeze=${bb1h.squeeze ?? 'n/a'}  breakout=${bb1h.breakout || 'none'}`,
+        `  1h atr=${atr1h.pct?.toFixed(2) ?? 'n/a'}%  4h rsi=${i4h.rsi_14?.toFixed(1) ?? 'n/a'}  ema_cross=${i4h.ema_cross || 'n/a'}`,
+        `  levels: support=$${d.levels?.support?.toFixed(2) ?? 'n/a'}  resist=$${d.levels?.resistance?.toFixed(2) ?? 'n/a'}`,
       ].join('\n');
     });
 
