@@ -72,8 +72,8 @@ const CONFIG = {
   initialBalance:        parseFloat(process.env.INITIAL_BALANCE        || '10000'),
   maxPositionSize:       parseFloat(process.env.MAX_POSITION_SIZE      || '0.15'),
   riskPerTrade:          parseFloat(process.env.RISK_PER_TRADE         || '0.02'),
-  improvementCycle:      parseInt(process.env.IMPROVEMENT_CYCLE        || '10'),
-  decisionInterval:      parseInt(process.env.DECISION_INTERVAL        || '60000'),
+  improvementCycle:      parseInt(process.env.IMPROVEMENT_CYCLE        || '30'),   // min 30 Trades vor Strategie-Check
+  decisionInterval:      parseInt(process.env.DECISION_INTERVAL        || '300000'), // 5 Minuten statt 60s → 5× weniger API Calls
   circuitBreakerDrawdown:parseFloat(process.env.CIRCUIT_BREAKER_DRAWDOWN || '20'),
   dashboardPort:         parseInt(process.env.DASHBOARD_PORT           || '3000'),
   coinbaseApiKey:        process.env.COINBASE_API_KEY,
