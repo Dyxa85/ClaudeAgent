@@ -93,9 +93,24 @@ class AnthropicClient {
     if (responseFormat === 'json') {
       // Strip markdown fences
       let cleaned = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-      // If Haiku added text before/after the JSON object, extract the JSON block
-      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-      if (jsonMatch) cleaned = jsonMatch[0];
+      // Brace-counting JSON extractor: finds the correctly-closed top-level object
+      // Handles cases where model adds text before/after JSON, or stray braces in strings
+      const start = cleaned.indexOf('{');
+      if (start !== -1) {
+        let depth = 0;
+        let inStr = false;
+        let esc   = false;
+        for (let i = start; i < cleaned.length; i++) {
+          const ch = cleaned[i];
+          if (esc)              { esc = false; continue; }
+          if (ch === '\\' && inStr) { esc = true;  continue; }
+          if (ch === '"')           { inStr = !inStr; continue; }
+          if (!inStr) {
+            if (ch === '{') depth++;
+            else if (ch === '}') { depth--; if (depth === 0) { cleaned = cleaned.slice(start, i + 1); break; } }
+          }
+        }
+      }
       return cleaned;
     }
     return text;

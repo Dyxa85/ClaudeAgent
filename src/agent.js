@@ -214,9 +214,26 @@ class TradingAgent {
     const decisions = await this.getAIDecisions(marketData, portfolioState, performance);
     await Promise.all(decisions.map(d => this.executeDecision(d, marketData)));
 
-    // Quality-gated self-improvement
+    // Quality-gated self-improvement — normal cycle
     if (this.tradeCount > 0 && this.tradeCount % this.config.improvementCycle === 0) {
       await this.selfImprove();
+    } else {
+      // Emergency improvement: catastrophic performance even with few trades
+      const sells = this.memory.getRecentTrades(50).filter(t => t.action === 'SELL');
+      if (sells.length >= 5 && !this._lastEmergencyImprove) {
+        const perf = this.getPerformanceMetrics();
+        const winRate = parseFloat(perf.win_rate) || 0;
+        const sharpe  = parseFloat(perf.sharpe_ratio) || 0;
+        if (winRate === 0 || (winRate < 0.25 && sharpe < -3)) {
+          this.logger.warn(`🚨 Emergency selfImprove: winRate=${(winRate*100).toFixed(0)}% sharpe=${sharpe.toFixed(1)} after ${sells.length} SELLs`);
+          this._lastEmergencyImprove = Date.now();
+          await this.selfImprove();
+        }
+      }
+      // Reset emergency flag after 2 hours so it can fire again if still bad
+      if (this._lastEmergencyImprove && Date.now() - this._lastEmergencyImprove > 7200000) {
+        this._lastEmergencyImprove = null;
+      }
     }
 
     this.recordPerformanceSnapshot();
@@ -264,6 +281,16 @@ class TradingAgent {
       ? `Active strategy: ${this.currentStrategy.name} (v${this.currentStrategy.version})\nRules: ${JSON.stringify(this.currentStrategy.rules)}`
       : 'No prior strategy — develop one based on market conditions';
 
+    // Inject hard overrides that supersede ANY strategy rule
+    const strategyOverrides = `
+HARD OVERRIDES (supersede all strategy rules):
+- Crypto markets are 24/7. NEVER apply time-of-day or day-of-week restrictions.
+- Circuit breakers / "halt trading" rules: advisory only. Maximum effective halt = 30 minutes.
+- "Consecutive loss stops" are advisory. Clear technical signals (RSI<30 + bullish MACD crossover, or RSI>70 + bearish crossover) justify re-entry regardless of loss streak.
+- If win_rate=0% but portfolio is intact (100% cash), this means NO capital was destroyed — just missed opportunities. Cautious re-entry is appropriate.
+- Volume requirements like "2x spike required" are preferred but NOT mandatory. Normal volume is acceptable for smaller position sizes.
+- Position sizes: $2 minimum, scale up to risk profile maximum. Never below $2 per trade.`;
+
     const cbPortfolioUSD = parseFloat(this.db.getMeta('coinbase_portfolio_usd', '0'));
     const cbHoldings     = JSON.parse(this.db.getMeta('coinbase_holdings_json', '[]'));
     const cbCtx = cbPortfolioUSD > 0
@@ -300,6 +327,7 @@ CONSTRAINTS:
 ${cbCtx}
 ${epochCtx}
 ${strategyContext}
+${strategyOverrides}
 
 RESPONSE FORMAT — valid JSON only:
 {
@@ -538,19 +566,19 @@ Make trading decisions. HOLD is valid when conditions are unclear.`;
   // ───────────────────────────────────────────────────────────────────────────
 
   async selfImprove() {
-    // Quality gate: only run when enough SELL data is available
+    // Quality gate: minimum 5 SELLs for any improvement
     const sells = this.memory.getRecentTrades(200).filter(t => t.action === 'SELL');
-    if (sells.length < 30) {
-      this.logger.info(`⏸️ Strategie-Optimierung übersprungen: nur ${sells.length}/30 Sells in Epoche`);
+    if (sells.length < 5) {
+      this.logger.info(`⏸️ Strategie-Optimierung übersprungen: nur ${sells.length}/5 Sells in Epoche`);
       return;
     }
 
     const performance = this.getPerformanceMetrics();
 
-    // Emergency switch: terrible performance even with enough trades
+    // Emergency switch: terrible performance after sufficient data
     const winRate = parseFloat(performance.win_rate) || 0;
     const sharpe  = parseFloat(performance.sharpe_ratio) || 0;
-    const isEmergency = (winRate < 0.40 || sharpe < -0.5) && sells.length >= 20;
+    const isEmergency = winRate === 0 || (winRate < 0.35 && sharpe < -1.0);
 
     if (isEmergency) {
       this.logger.warn(
@@ -583,6 +611,14 @@ Tasks:
 2. Are entry/exit timing signals optimal?
 3. Should position sizing or risk parameters change?
 4. If EMERGENCY MODE: propose a significantly different approach.
+
+MANDATORY CONSTRAINTS for the new strategy:
+- NO time-of-day or day-of-week restrictions. Crypto is 24/7.
+- Circuit breakers must reset after max 30 minutes (not 2 hours).
+- Consecutive loss limits: max 5 in a row, then 30-min wait only.
+- Volume confirmation: preferred, but NOT a hard blocker. Use "preferred" language.
+- Position sizes: $5–$25 per trade. Never $0.50 or $1 (too small, fee erosion).
+- Do NOT create rules that result in 100% HOLD for extended periods.
 
 Respond with improved strategy JSON only:
 {
