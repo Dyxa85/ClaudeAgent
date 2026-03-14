@@ -218,20 +218,31 @@ class TradingAgent {
     if (this.tradeCount > 0 && this.tradeCount % this.config.improvementCycle === 0) {
       await this.selfImprove();
     } else {
-      // Emergency improvement: catastrophic performance even with few trades
+      // Emergency improvement: only fires when RECENT trades (not epoch-wide contaminated history)
+      // show persistent failure AND the current strategy is old enough to justify a redo
       const sells = this.memory.getRecentTrades(50).filter(t => t.action === 'SELL');
       if (sells.length >= 5 && !this._lastEmergencyImprove) {
-        const perf = this.getPerformanceMetrics();
-        const winRate = parseFloat(perf.win_rate) || 0;
-        const sharpe  = parseFloat(perf.sharpe_ratio) || 0;
-        if (winRate === 0 || (winRate < 0.25 && sharpe < -3)) {
-          this.logger.warn(`🚨 Emergency selfImprove: winRate=${(winRate*100).toFixed(0)}% sharpe=${sharpe.toFixed(1)} after ${sells.length} SELLs`);
-          this._lastEmergencyImprove = Date.now();
-          await this.selfImprove();
+        // Skip if strategy was recently improved (< 6h) — avoids Sonnet overuse on bad epoch stats
+        const stratAgeHrs = this.currentStrategy?.saved_at
+          ? (Date.now() - new Date(this.currentStrategy.saved_at).getTime()) / 3600000
+          : 99;
+
+        if (stratAgeHrs >= 6) {
+          // Judge performance on last 8 SELLs only — not epoch-wide (which may include old carryovers)
+          const recent8    = sells.slice(-8);
+          const recentWins = recent8.filter(t => (t.realized_pnl || 0) > 0).length;
+          const recentWR   = recent8.length >= 3 ? recentWins / recent8.length : null;
+          const sharpe     = parseFloat(this.getPerformanceMetrics().sharpe_ratio) || 0;
+
+          if (recentWR !== null && (recentWR === 0 || (recentWR < 0.25 && sharpe < -3))) {
+            this.logger.warn(`🚨 Emergency selfImprove: recent WR=${(recentWR*100).toFixed(0)}% (${recent8.length} SELLs) sharpe=${sharpe.toFixed(1)} stratAge=${stratAgeHrs.toFixed(1)}h`);
+            this._lastEmergencyImprove = Date.now();
+            await this.selfImprove();
+          }
         }
       }
-      // Reset emergency flag after 2 hours so it can fire again if still bad
-      if (this._lastEmergencyImprove && Date.now() - this._lastEmergencyImprove > 7200000) {
+      // Cooldown 6 hours (was 2h — was burning Sonnet tokens on contaminated epoch stats)
+      if (this._lastEmergencyImprove && Date.now() - this._lastEmergencyImprove > 21600000) {
         this._lastEmergencyImprove = null;
       }
     }
